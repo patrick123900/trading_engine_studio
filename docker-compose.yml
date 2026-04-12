@@ -1,0 +1,7 @@
+services:
+  trading-engine-studio:
+    build: .
+    container_name: trading-engine-studio
+    ports:
+      - "8080:80"
+    restart: unless-stopped
