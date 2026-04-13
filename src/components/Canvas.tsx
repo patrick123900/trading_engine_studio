@@ -69,6 +69,8 @@ interface MenuState {
   y: number;
   worldX: number;
   worldY: number;
+  screenX: number;
+  screenY: number;
 }
 
 interface PortPosition {
@@ -118,7 +120,6 @@ const PORT_DOT_SIZE = 10;
 const PORT_RADIUS = PORT_DOT_SIZE / 2;
 const WORLD_SIZE = 50000;
 const WORLD_ORIGIN = WORLD_SIZE / 2;
-
 function clampCamera(
   nextCamera: { x: number; y: number; zoom: number },
   canvasSize: { width: number; height: number },
@@ -249,6 +250,7 @@ export function Canvas({
   } | null>(null);
   const [menuState, setMenuState] = useState<MenuState | null>(null);
   const [menuCategory, setMenuCategory] = useState<string | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const [isFileMenuOpen, setIsFileMenuOpen] = useState(false);
   const [isEditMenuOpen, setIsEditMenuOpen] = useState(false);
   const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
@@ -266,6 +268,12 @@ export function Canvas({
   const [hoveredDeleteEdgeId, setHoveredDeleteEdgeId] = useState<string | null>(null);
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [liveBoxSelectedNodeIds, setLiveBoxSelectedNodeIds] = useState<string[]>([]);
+  const [editingNumberFields, setEditingNumberFields] = useState<Record<string, string>>({});
+  const [hoveredHelpTooltip, setHoveredHelpTooltip] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const selectionBoxDragRef = useRef<{ pointerId: number; moved: boolean } | null>(null);
   const suppressNodeClickRef = useRef<string | null>(null);
   const suppressCanvasClickRef = useRef(false);
@@ -310,15 +318,19 @@ export function Canvas({
     }
   };
 
-  const nodeHeight = (definition: NodeDefinition | undefined) => {
+  const shouldHideField = (node: GraphNode, fieldKey: string) =>
+    node.type === "trading.execution" && fieldKey === "positionPnlPercent";
+
+  const nodeHeight = (node: GraphNode, definition: NodeDefinition | undefined) => {
     if (!definition) {
       return 96;
     }
 
     const portRows = Math.max(definition.inputs.length, definition.outputs.length, 1);
     const portsHeight = 14 + portRows * PORT_ROW_HEIGHT + 10;
-    const fieldsHeight = definition.fields.length
-      ? 14 + definition.fields.length * FIELD_HEIGHT + Math.max(0, definition.fields.length - 1) * FIELD_GAP
+    const visibleFieldCount = definition.fields.filter((field) => !shouldHideField(node, field.key)).length;
+    const fieldsHeight = visibleFieldCount
+      ? 14 + visibleFieldCount * FIELD_HEIGHT + Math.max(0, visibleFieldCount - 1) * FIELD_GAP
       : 0;
     return HEADER_HEIGHT + portsHeight + fieldsHeight;
   };
@@ -327,7 +339,7 @@ export function Canvas({
     const definition = definitionMap.get(node.type);
     return {
       x: node.position.x + NODE_WIDTH / 2,
-      y: node.position.y + nodeHeight(definition) / 2,
+      y: node.position.y + nodeHeight(node, definition) / 2,
     };
   };
 
@@ -339,7 +351,7 @@ export function Canvas({
     const bounds = nodes.reduce(
       (acc, node) => {
         const definition = definitionMap.get(node.type);
-        const height = nodeHeight(definition);
+        const height = nodeHeight(node, definition);
 
         return {
           minX: Math.min(acc.minX, node.position.x),
@@ -429,6 +441,52 @@ export function Canvas({
       y: (canvasSize.height / 2 - activeCamera.y) / activeCamera.zoom - WORLD_ORIGIN,
     };
   };
+
+  const visibleFields = (node: GraphNode, definition: NodeDefinition | undefined) => {
+    if (!definition) {
+      return [];
+    }
+
+    return definition.fields.filter((field) => !shouldHideField(node, field.key));
+  };
+
+  const getNumberFieldKey = (nodeId: string, fieldKey: string) => `${nodeId}:${fieldKey}`;
+
+  const updateMenuPosition = (clientX: number, clientY: number) => {
+    const point = getViewportPoint(clientX, clientY);
+    const world = screenToWorld(clientX, clientY);
+    setMenuState({
+      x: point.x,
+      y: point.y,
+      worldX: world.x,
+      worldY: world.y,
+      screenX: clientX,
+      screenY: clientY,
+    });
+    setMenuCategory(null);
+  };
+
+  useLayoutEffect(() => {
+    if (!menuState || !contextMenuRef.current) {
+      return;
+    }
+
+    const rect = contextMenuRef.current.getBoundingClientRect();
+    const nextScreenX = Math.min(Math.max(0, menuState.screenX), Math.max(0, window.innerWidth - rect.width));
+    const nextScreenY = Math.min(Math.max(0, menuState.screenY), Math.max(0, window.innerHeight - rect.height));
+
+    if (nextScreenX !== menuState.screenX || nextScreenY !== menuState.screenY) {
+      setMenuState((current) =>
+        current
+          ? {
+              ...current,
+              screenX: nextScreenX,
+              screenY: nextScreenY,
+            }
+          : current,
+      );
+    }
+  }, [menuState, menuCategory]);
 
   const findPortCenter = (nodeId: string, portId: string, side: "input" | "output") => {
     const portKey = `${nodeId}:${portId}:${side}`;
@@ -568,27 +626,11 @@ export function Canvas({
     return distances;
   }, [cursorWorldPoint, edges, portPositions]);
 
-  const previewableEdgeIds = useMemo(
+  const previewableOutputKeys = useMemo(
     () => new Set(Object.keys(backtestResult?.previewSeriesByEdgeId ?? {})),
     [backtestResult],
   );
   const selectedPreviewEdgeSet = useMemo(() => new Set(selectedPreviewEdgeIds), [selectedPreviewEdgeIds]);
-  const previewEdgeIdByOutputKey = useMemo(() => {
-    const mapping = new Map<string, string>();
-
-    for (const edge of edges) {
-      if (!previewableEdgeIds.has(edge.id)) {
-        continue;
-      }
-
-      const outputKey = `${edge.fromNodeId}:${edge.fromPortId}`;
-      if (!mapping.has(outputKey)) {
-        mapping.set(outputKey, edge.id);
-      }
-    }
-
-    return mapping;
-  }, [edges, previewableEdgeIds]);
 
   const stopAllInteractions = () => {
     dragStateRef.current = null;
@@ -615,7 +657,7 @@ export function Canvas({
         const nodeLeft = node.position.x;
         const nodeRight = node.position.x + NODE_WIDTH;
         const nodeTop = node.position.y;
-        const nodeBottom = node.position.y + nodeHeight(definitionMap.get(node.type));
+        const nodeBottom = node.position.y + nodeHeight(node, definitionMap.get(node.type));
         return !(nodeRight < left || nodeLeft > right || nodeBottom < top || nodeTop > bottom);
       })
       .map((node) => node.id);
@@ -883,6 +925,7 @@ export function Canvas({
           }
         }}
         onPointerDown={(event) => {
+          setHoveredHelpTooltip(null);
           if (
             event.target instanceof Element &&
             event.target.closest(".node-card, .context-menu, .run-button, .pending-connection-pill, .canvas-fab")
@@ -1130,13 +1173,12 @@ export function Canvas({
         }}
         onContextMenu={(event) => {
           event.preventDefault();
-          const point = getViewportPoint(event.clientX, event.clientY);
-          const world = screenToWorld(event.clientX, event.clientY);
-          setMenuState({ x: point.x, y: point.y, worldX: world.x, worldY: world.y });
-          setMenuCategory(null);
+          setHoveredHelpTooltip(null);
+          updateMenuPosition(event.clientX, event.clientY);
         }}
         onPointerLeave={() => {
           setCursorWorldPoint(null);
+          setHoveredHelpTooltip(null);
         }}
       >
         <div
@@ -1159,7 +1201,7 @@ export function Canvas({
                 <g key={edge.id}>
                   <path className="edge-shadow" d={path.d} />
                   <path
-                    className={`edge-wire ${selectedPreviewEdgeSet.has(edge.id) ? "is-preview-selected" : ""}`}
+                    className={`edge-wire ${selectedPreviewEdgeSet.has(`${edge.fromNodeId}:${edge.fromPortId}`) ? "is-preview-selected" : ""}`}
                     d={path.d}
                     style={{ stroke: path.start.color }}
                   />
@@ -1183,8 +1225,9 @@ export function Canvas({
 
           {nodes.map((node) => {
             const definition = definitionMap.get(node.type);
-            const height = nodeHeight(definition);
+            const height = nodeHeight(node, definition);
             const portRows = Math.max(definition?.inputs.length ?? 0, definition?.outputs.length ?? 0, 1);
+            const nodeVisibleFields = visibleFields(node, definition);
 
             return (
               <div
@@ -1213,54 +1256,55 @@ export function Canvas({
                   }
                 }}
               >
-                <div
-                  className="node-header drag-handle"
-                  style={{ background: definition?.color ?? "#334155" }}
-                  onPointerDown={(event) => {
-                    event.stopPropagation();
-                    if (event.ctrlKey) {
-                      event.preventDefault();
-                      suppressNodeClickRef.current = node.id;
-                      onToggleNodeSelection(node.id);
-                      dragStateRef.current = null;
-                      dragMoveStateRef.current = null;
-                    } else if (!effectiveSelectedNodeSet.has(node.id)) {
-                      onSelectSingleNode(node.id);
-                    }
-
-                    if (event.ctrlKey || event.metaKey) {
-                      return;
-                    }
-
-                    const world = screenToWorld(event.clientX, event.clientY);
-                    dragStateRef.current = {
-                      nodeId: node.id,
-                      offsetX: world.x - node.position.x,
-                      offsetY: world.y - node.position.y,
-                    };
-                    dragMoveStateRef.current = {
-                      pointerId: event.pointerId,
-                      startX: event.clientX,
-                      startY: event.clientY,
-                      moved: false,
-                    };
-                  }}
-                >
-                  <span className="node-header-title">{node.title}</span>
-                  <button
-                    type="button"
-                    className="node-delete"
-                    onClick={(event) => {
+                <div className="node-card-shell">
+                  <div
+                    className="node-header drag-handle"
+                    style={{ background: definition?.color ?? "#334155" }}
+                    onPointerDown={(event) => {
                       event.stopPropagation();
-                      onDeleteNode(node.id);
+                      if (event.ctrlKey) {
+                        event.preventDefault();
+                        suppressNodeClickRef.current = node.id;
+                        onToggleNodeSelection(node.id);
+                        dragStateRef.current = null;
+                        dragMoveStateRef.current = null;
+                      } else if (!effectiveSelectedNodeSet.has(node.id)) {
+                        onSelectSingleNode(node.id);
+                      }
+
+                      if (event.ctrlKey || event.metaKey) {
+                        return;
+                      }
+
+                      const world = screenToWorld(event.clientX, event.clientY);
+                      dragStateRef.current = {
+                        nodeId: node.id,
+                        offsetX: world.x - node.position.x,
+                        offsetY: world.y - node.position.y,
+                      };
+                      dragMoveStateRef.current = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        moved: false,
+                      };
                     }}
                   >
-                    ×
-                  </button>
-                </div>
+                    <span className="node-header-title">{node.title}</span>
+                    <button
+                      type="button"
+                      className="node-delete"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDeleteNode(node.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
 
-                <div className="node-body">
-                  {Array.from({ length: portRows }).map((_, index) => {
+                  <div className="node-body">
+                    {Array.from({ length: portRows }).map((_, index) => {
                     const input = definition?.inputs[index];
                     const output = definition?.outputs[index];
 
@@ -1316,57 +1360,76 @@ export function Canvas({
                                 setDragPreviewPoint(screenToWorld(event.clientX, event.clientY));
                               }}
                             >
-                              <span
-                                className={`port-label ${previewEdgeIdByOutputKey.has(`${node.id}:${output.id}`) ? "is-previewable" : ""} ${
-                                  selectedPreviewEdgeSet.has(previewEdgeIdByOutputKey.get(`${node.id}:${output.id}`) ?? "") ? "is-preview-selected" : ""
-                                }`}
-                                onPointerDown={(event) => {
-                                  const outputKey = `${node.id}:${output.id}`;
-                                  if (!previewEdgeIdByOutputKey.has(outputKey)) {
-                                    return;
-                                  }
-
-                                  event.stopPropagation();
-                                  event.preventDefault();
-                                  previewPressRef.current = {
-                                    pointerId: event.pointerId,
-                                    outputKey,
-                                    cancelled: false,
-                                  };
-                                }}
-                                onPointerLeave={(event) => {
-                                  if (
-                                    previewPressRef.current &&
-                                    previewPressRef.current.pointerId === event.pointerId
-                                  ) {
-                                    previewPressRef.current.cancelled = true;
-                                  }
-                                }}
-                                onPointerUp={(event) => {
-                                  const outputKey = `${node.id}:${output.id}`;
-                                  if (
-                                    !previewPressRef.current ||
-                                    previewPressRef.current.pointerId !== event.pointerId ||
-                                    previewPressRef.current.outputKey !== outputKey ||
-                                    previewPressRef.current.cancelled
-                                  ) {
-                                    previewPressRef.current = null;
-                                    return;
-                                  }
-
-                                  event.stopPropagation();
-                                  event.preventDefault();
-                                  const previewEdgeId = previewEdgeIdByOutputKey.get(outputKey);
-                                  if (previewEdgeId) {
-                                    onSelectPreviewEdge(previewEdgeId, event.ctrlKey || event.metaKey);
-                                    if (isResultsCollapsed) {
-                                      setIsResultsCollapsed(false);
+                              <span className="port-output-meta">
+                                <span
+                                  className={`port-label ${previewableOutputKeys.has(`${node.id}:${output.id}`) ? "is-previewable" : ""} ${
+                                    selectedPreviewEdgeSet.has(`${node.id}:${output.id}`) ? "is-preview-selected" : ""
+                                  }`}
+                                  onPointerDown={(event) => {
+                                    const outputKey = `${node.id}:${output.id}`;
+                                    if (!previewableOutputKeys.has(outputKey)) {
+                                      return;
                                     }
-                                  }
-                                  previewPressRef.current = null;
-                                }}
-                              >
-                                {output.label}
+
+                                    event.stopPropagation();
+                                    event.preventDefault();
+                                    previewPressRef.current = {
+                                      pointerId: event.pointerId,
+                                      outputKey,
+                                      cancelled: false,
+                                    };
+                                  }}
+                                  onPointerLeave={(event) => {
+                                    if (
+                                      previewPressRef.current &&
+                                      previewPressRef.current.pointerId === event.pointerId
+                                    ) {
+                                      previewPressRef.current.cancelled = true;
+                                    }
+                                  }}
+                                  onPointerUp={(event) => {
+                                    const outputKey = `${node.id}:${output.id}`;
+                                    if (
+                                      !previewPressRef.current ||
+                                      previewPressRef.current.pointerId !== event.pointerId ||
+                                      previewPressRef.current.outputKey !== outputKey ||
+                                      previewPressRef.current.cancelled
+                                    ) {
+                                      previewPressRef.current = null;
+                                      return;
+                                    }
+
+                                    event.stopPropagation();
+                                    event.preventDefault();
+                                    if (previewableOutputKeys.has(outputKey)) {
+                                      onSelectPreviewEdge(outputKey, event.ctrlKey || event.metaKey);
+                                      if (isResultsCollapsed) {
+                                        setIsResultsCollapsed(false);
+                                      }
+                                    }
+                                    previewPressRef.current = null;
+                                  }}
+                                >
+                                  {output.label}
+                                </span>
+                                {node.type === "trading.execution" && output.id === "positionPnl" ? (
+                                  <label
+                                    className="port-inline-toggle"
+                                    onPointerDown={(event) => {
+                                      event.stopPropagation();
+                                    }}
+                                    onClick={(event) => event.stopPropagation()}
+                                  >
+                                    <span className="port-inline-toggle-prefix">%</span>
+                                    <input
+                                      type="checkbox"
+                                      checked={Boolean(node.config.positionPnlPercent)}
+                                      onChange={(event) =>
+                                        onUpdateNodeConfig(node.id, "positionPnlPercent", event.target.checked)
+                                      }
+                                    />
+                                  </label>
+                                ) : null}
                               </span>
                               <span
                                 className="port-dot"
@@ -1381,13 +1444,18 @@ export function Canvas({
                         </div>
                       </div>
                     );
-                  })}
-                </div>
+                    })}
+                  </div>
 
-                {definition?.fields.length ? (
-                  <div className="node-fields">
-                    {definition.fields.map((field) => {
+                  {nodeVisibleFields.length ? (
+                    <div className="node-fields">
+                      {nodeVisibleFields.map((field) => {
                       const value = node.config[field.key] ?? field.defaultValue;
+                      const numberFieldKey = getNumberFieldKey(node.id, field.key);
+                      const numberInputValue =
+                        field.type === "number" && numberFieldKey in editingNumberFields
+                          ? editingNumberFields[numberFieldKey]
+                          : String(value);
 
                       return (
                         <label
@@ -1420,26 +1488,110 @@ export function Canvas({
                             </>
                           ) : (
                             <>
-                              <span className="node-field-label">{field.label}</span>
-                              <input
-                                type={field.type === "number" ? "number" : "text"}
-                                step={field.type === "number" ? "any" : undefined}
-                                value={String(value)}
-                                onChange={(event) =>
-                                  onUpdateNodeConfig(
-                                    node.id,
-                                    field.key,
-                                    field.type === "number" ? Number(event.target.value) : event.target.value,
-                                  )
-                                }
-                              />
+                              <span className="node-field-label-row">
+                                <span className="node-field-label">{field.label}</span>
+                                {field.helpText ? (
+                                  <span className="node-help">
+                                    <button
+                                      type="button"
+                                      className="node-help-button"
+                                      tabIndex={-1}
+                                      aria-label={`${field.label} help`}
+                                      onPointerEnter={(event) => {
+                                        const rect = event.currentTarget.getBoundingClientRect();
+                                        setHoveredHelpTooltip({
+                                          text: field.helpText ?? "",
+                                          x: rect.left,
+                                          y: rect.top - 8,
+                                        });
+                                      }}
+                                      onPointerLeave={() => setHoveredHelpTooltip(null)}
+                                      onPointerDown={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        setHoveredHelpTooltip(null);
+                                      }}
+                                    >
+                                      ?
+                                    </button>
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="node-field-input-row">
+                                <input
+                                  type={field.type === "number" ? "number" : "text"}
+                                  step={field.type === "number" ? "any" : undefined}
+                                  value={field.type === "number" ? numberInputValue : String(value)}
+                                  onFocus={(event) => {
+                                    if (field.type !== "number") {
+                                      return;
+                                    }
+
+                                    setEditingNumberFields((current) => ({
+                                      ...current,
+                                      [numberFieldKey]: event.target.value,
+                                    }));
+                                  }}
+                                  onChange={(event) => {
+                                    if (field.type === "number") {
+                                      const nextRaw = event.target.value;
+                                      setEditingNumberFields((current) => ({
+                                        ...current,
+                                        [numberFieldKey]: nextRaw,
+                                      }));
+
+                                      if (
+                                        nextRaw === "" ||
+                                        nextRaw === "-" ||
+                                        nextRaw === "." ||
+                                        nextRaw === "-." ||
+                                        nextRaw.endsWith(".")
+                                      ) {
+                                        return;
+                                      }
+
+                                      const parsed = Number(nextRaw);
+                                      if (Number.isFinite(parsed)) {
+                                        onUpdateNodeConfig(node.id, field.key, parsed);
+                                      }
+                                      return;
+                                    }
+
+                                    onUpdateNodeConfig(node.id, field.key, event.target.value);
+                                  }}
+                                  onBlur={() => {
+                                    if (field.type !== "number") {
+                                      return;
+                                    }
+
+                                    const rawValue = editingNumberFields[numberFieldKey];
+                                    if (rawValue !== undefined) {
+                                      const parsed = Number(rawValue);
+                                      if (rawValue !== "" && Number.isFinite(parsed)) {
+                                        onUpdateNodeConfig(node.id, field.key, parsed);
+                                      }
+                                    }
+
+                                    setEditingNumberFields((current) => {
+                                      if (!(numberFieldKey in current)) {
+                                        return current;
+                                      }
+
+                                      const next = { ...current };
+                                      delete next[numberFieldKey];
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              </span>
                             </>
                           )}
                         </label>
                       );
-                    })}
-                  </div>
-                ) : null}
+                      })}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             );
           })}
@@ -1499,6 +1651,18 @@ export function Canvas({
               height: `${Math.abs(selectionBox.endY - selectionBox.startY) * camera.zoom}px`,
             }}
           />
+        ) : null}
+
+        {hoveredHelpTooltip ? (
+          <div
+            className="node-help-tooltip-overlay"
+            style={{
+              left: `${hoveredHelpTooltip.x}px`,
+              top: `${hoveredHelpTooltip.y}px`,
+            }}
+          >
+            {hoveredHelpTooltip.text}
+          </div>
         ) : null}
 
         <div className="canvas-fab-stack">
@@ -1576,53 +1740,6 @@ export function Canvas({
           </button>
         ) : null}
 
-        {menuState ? (
-          <div
-            className="context-menu"
-            style={{ left: `${menuState.x}px`, top: `${menuState.y}px` }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="context-menu-viewport">
-              <div
-                className={`context-menu-track ${menuCategory ? "is-showing-nodes" : ""}`}
-              >
-                <div className="context-menu-panel">
-                  <div className="context-menu-title">Add Node</div>
-                  {Object.keys(groupedDefinitions).map((category) => (
-                    <button
-                      key={category}
-                      type="button"
-                      className="context-menu-item"
-                      onClick={() => setMenuCategory(category)}
-                    >
-                      {category}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="context-menu-panel">
-                  <button type="button" className="context-menu-back" onClick={() => setMenuCategory(null)}>
-                    ← Add Node
-                  </button>
-                  {(menuCategory ? groupedDefinitions[menuCategory] ?? [] : []).map((definition) => (
-                    <button
-                      key={definition.type}
-                      type="button"
-                      className="context-menu-item"
-                      onClick={() => {
-                        onAddNode(definition.type, menuState.worldX, menuState.worldY);
-                        setMenuState(null);
-                        setMenuCategory(null);
-                      }}
-                    >
-                      {definition.title}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
       </div>
       {backtestResult ? (
         <div
@@ -1672,6 +1789,54 @@ export function Canvas({
               />
             </>
           )}
+        </div>
+      ) : null}
+      {menuState ? (
+        <div
+          ref={contextMenuRef}
+          className="context-menu context-menu-overlay"
+          style={{ left: `${menuState.screenX}px`, top: `${menuState.screenY}px` }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="context-menu-viewport">
+            <div
+              className={`context-menu-track ${menuCategory ? "is-showing-nodes" : ""}`}
+            >
+              <div className="context-menu-panel">
+                <div className="context-menu-title">Add Node</div>
+                {Object.keys(groupedDefinitions).map((category) => (
+                  <button
+                    key={category}
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => setMenuCategory(category)}
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
+
+              <div className="context-menu-panel">
+                <button type="button" className="context-menu-back" onClick={() => setMenuCategory(null)}>
+                  ← Add Node
+                </button>
+                {(menuCategory ? groupedDefinitions[menuCategory] ?? [] : []).map((definition) => (
+                  <button
+                    key={definition.type}
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => {
+                      onAddNode(definition.type, menuState.worldX, menuState.worldY);
+                      setMenuState(null);
+                      setMenuCategory(null);
+                    }}
+                  >
+                    {definition.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
     </main>

@@ -297,7 +297,6 @@ interface PositionState {
   direction: "long" | "short";
   entryPrice: number;
   quantity: number;
-  entryEquity: number;
   entryTimestamp: string;
 }
 
@@ -307,7 +306,7 @@ function markToMarketEquity(cash: number, position: PositionState | null, curren
   }
 
   const directionSign = position.direction === "short" ? -1 : 1;
-  return position.entryEquity + (currentPrice - position.entryPrice) * position.quantity * directionSign;
+  return cash + (currentPrice - position.entryPrice) * position.quantity * directionSign;
 }
 
 function closePositionAtPrice(cash: number, position: PositionState, exitPrice: number) {
@@ -327,6 +326,16 @@ function applySlippage(price: number, direction: "long" | "short", event: "entry
 
 function applyCommission(equity: number, notional: number, commissionPct: number) {
   return equity - notional * (commissionPct / 100);
+}
+
+function resolvePositionNotional(
+  capital: number,
+  mode: "fixed" | "percent",
+  amount: number,
+) {
+  const safeCapital = Math.max(0, capital);
+  const safeAmount = Math.max(0, amount);
+  return mode === "fixed" ? safeAmount : safeCapital * (safeAmount / 100);
 }
 
 function resolveExecutionPriceData(graph: StrategyGraph, snapshot: ExecutionSnapshot, executionProduct: unknown) {
@@ -439,26 +448,32 @@ function extractSeriesPreview(value: unknown): { values: number[]; timestamps: s
 function buildPreviewSeriesByEdgeId(graph: StrategyGraph, snapshot: ExecutionSnapshot): Record<string, SeriesPreview> {
   const previews: Record<string, SeriesPreview> = {};
 
-  for (const edge of graph.edges) {
-    const sourceNode = graph.nodes.find((node) => node.id === edge.fromNodeId);
-    const sourceDefinition = sourceNode ? defaultNodeRegistry.get(sourceNode.type) : undefined;
-    const sourcePort = sourceDefinition?.outputs.find((port) => port.id === edge.fromPortId);
-    const sourceValue = snapshot.outputsByNodeId.get(edge.fromNodeId)?.[edge.fromPortId];
-    const preview = extractSeriesPreview(sourceValue);
-
-    if (!preview || preview.values.length === 0) {
+  for (const sourceNode of graph.nodes) {
+    const sourceDefinition = defaultNodeRegistry.get(sourceNode.type);
+    const outputRecord = snapshot.outputsByNodeId.get(sourceNode.id);
+    if (!sourceDefinition || !outputRecord) {
       continue;
     }
 
-    previews[edge.id] = {
-      edgeId: edge.id,
-      sourceNodeId: edge.fromNodeId,
-      sourceNodeTitle: sourceNode?.title ?? sourceDefinition?.title ?? edge.fromNodeId,
-      sourcePortId: edge.fromPortId,
-      sourcePortLabel: sourcePort?.label ?? edge.fromPortId,
-      values: preview.values,
-      timestamps: preview.timestamps,
-    };
+    for (const sourcePort of sourceDefinition.outputs) {
+      const outputKey = `${sourceNode.id}:${sourcePort.id}`;
+      const sourceValue = outputRecord[sourcePort.id];
+    const preview = extractSeriesPreview(sourceValue);
+
+      if (!preview || preview.values.length === 0) {
+        continue;
+      }
+
+      previews[outputKey] = {
+        edgeId: outputKey,
+        sourceNodeId: sourceNode.id,
+        sourceNodeTitle: sourceNode.title ?? sourceDefinition.title ?? sourceNode.id,
+        sourcePortId: sourcePort.id,
+        sourcePortLabel: sourcePort.label ?? sourcePort.id,
+        values: preview.values,
+        timestamps: preview.timestamps,
+      };
+    }
   }
 
   return previews;
@@ -490,6 +505,9 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
       allowShorts?: boolean;
       slippagePct?: number;
       commissionPct?: number;
+      startingCapital?: number;
+      positionSizingMode?: "fixed" | "percent";
+      positionAmount?: number;
     };
   } | undefined;
   const dataset = resolveExecutionPriceData(graph, snapshot, execution?.product);
@@ -500,6 +518,9 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
   const allowShorts = execution?.settings?.allowShorts ?? true;
   const slippagePct = Math.max(0, execution?.settings?.slippagePct ?? 0);
   const commissionPct = Math.max(0, execution?.settings?.commissionPct ?? 0);
+  const initialCapital = Math.max(0, execution?.settings?.startingCapital ?? 100000);
+  const positionSizingMode = execution?.settings?.positionSizingMode === "fixed" ? "fixed" : "percent";
+  const positionAmount = Math.max(0, execution?.settings?.positionAmount ?? 100);
 
   if (timestamps.length === 0 || close.length === 0) {
     return {
@@ -523,7 +544,6 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
     };
   }
 
-  const initialCapital = 100000;
   let cash = initialCapital;
   let buyHoldEquity = initialCapital;
   let position: PositionState | null = null;
@@ -565,13 +585,13 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
 
       if (!position && pendingTransition !== "flat") {
         const entryPrice = applySlippage(openPrice, pendingTransition, "entry", slippagePct);
-        const quantity = cash / (entryPrice * (1 + commissionPct / 100));
-        cash = applyCommission(cash, quantity * entryPrice, commissionPct);
+        const positionNotional = resolvePositionNotional(cash, positionSizingMode, positionAmount);
+        const quantity = entryPrice > 0 ? positionNotional / entryPrice : 0;
+        cash = applyCommission(cash, positionNotional, commissionPct);
         position = {
           direction: pendingTransition,
           entryPrice: entryPrice,
           quantity,
-          entryEquity: cash,
           entryTimestamp: timestamps[index],
         };
         tradeMarkers.push({ timestamp: timestamps[index], price: entryPrice, event: "entry", direction: pendingTransition });
@@ -708,7 +728,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
       `Loaded execution price data for symbol ${execution?.product?.symbol ?? dataset?.symbol ?? "unknown"}.`,
       `Executed ${snapshot.orderedNodes.length} nodes in dependency order.`,
       `Aggregated ${executionSignals.length} signal stream${executionSignals.length === 1 ? "" : "s"} into a target-position model.`,
-      `Execution settings: slippage ${slippagePct.toFixed(3)}%, commission ${commissionPct.toFixed(3)}%, shorts ${allowShorts ? "enabled" : "disabled"}.`,
+      `Execution settings: capital $${initialCapital.toLocaleString()}, sizing ${positionSizingMode === "fixed" ? "$" : ""}${positionAmount}${positionSizingMode === "percent" ? "%" : ""}, slippage ${slippagePct.toFixed(3)}%, commission ${commissionPct.toFixed(3)}%, shorts ${allowShorts ? "enabled" : "disabled"}.`,
       `Generated ${tradeMarkers.filter((marker) => marker.event === "entry").length} entries and ${tradeMarkers.filter((marker) => marker.event === "exit").length} exits.`,
       `Closed ${executedTrades.length} position${executedTrades.length === 1 ? "" : "s"} using next-bar open fills.`,
       `Final strategy equity: $${endingEquity.toLocaleString()}.`,
