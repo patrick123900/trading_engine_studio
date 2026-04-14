@@ -7,12 +7,14 @@ import {
   Squares2X2Icon,
   VideoCameraIcon,
 } from "@heroicons/react/24/outline";
-import type { BacktestResult, GraphCameraState, GraphEdge, GraphNode, NodeDefinition } from "../core/types";
+import type { BacktestResult, GraphCameraState, GraphEdge, GraphGroup, GraphNode, NodeDefinition } from "../core/types";
+import { buildPortalInInputs, buildPortalOutOutputs, getPortalInChannels, getPortalOutChannels } from "../core/nodes/portalChannels";
 import { ResultsPanel } from "./ResultsPanel";
 
 interface CanvasProps {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  groups: GraphGroup[];
   definitions: NodeDefinition[];
   selectedNodeIds: string[];
   pendingConnection: { nodeId: string; portId: string } | null;
@@ -49,12 +51,24 @@ interface CanvasProps {
   onSelectNodes: (nodeIds: string[]) => void;
   onSelectPreviewEdge: (edgeId: string | null, additive?: boolean) => void;
   onMoveNode: (nodeId: string, x: number, y: number) => void;
+  onAddGroup: (x: number, y: number) => void;
+  onMoveGroup: (groupId: string, x: number, y: number, nodeIds: string[]) => void;
+  onResizeGroup: (groupId: string, x: number, y: number, width: number, height: number) => void;
+  onRenameGroup: (groupId: string, title: string) => void;
+  onDeleteGroup: (groupId: string) => void;
   onAddNode: (definitionType: string, x: number, y: number) => void;
   onStartConnection: (nodeId: string, portId: string) => void;
   onCompleteConnection: (nodeId: string, portId: string) => void;
   onRemoveEdge: (edgeId: string) => void;
   onClearPendingConnection: () => void;
-  onUpdateNodeConfig: (nodeId: string, key: string, value: string | number | boolean) => void;
+  onUpdateNodeConfig: (nodeId: string, key: string, value: string | number | boolean | string[]) => void;
+  onAddPortalOutChannel: (nodeId: string) => void;
+  onUpdatePortalOutChannel: (nodeId: string, index: number, value: string) => void;
+  onRemovePortalOutChannel: (nodeId: string, index: number) => void;
+  onAddPortalInChannel: (nodeId: string) => void;
+  onUpdatePortalInChannel: (nodeId: string, index: number, value: string) => void;
+  onRemovePortalInChannel: (nodeId: string, index: number) => void;
+  onRenameNode: (nodeId: string, title: string) => void;
   onDeleteNode: (nodeId: string) => void;
   onRun: () => void;
   isRunningBacktest: boolean;
@@ -112,6 +126,7 @@ function arePortPositionsEqual(
 
 const NODE_WIDTH = 250;
 const HEADER_HEIGHT = 38;
+const GROUP_HEADER_HEIGHT = 38;
 const FIELD_HEIGHT = 42;
 const FIELD_GAP = 8;
 const PORT_ROW_HEIGHT = 26;
@@ -180,6 +195,7 @@ function MenuItemLabel({
 export function Canvas({
   nodes,
   edges,
+  groups,
   definitions,
   selectedNodeIds,
   pendingConnection,
@@ -216,12 +232,24 @@ export function Canvas({
   onSelectNodes,
   onSelectPreviewEdge,
   onMoveNode,
+  onAddGroup,
+  onMoveGroup,
+  onResizeGroup,
+  onRenameGroup,
+  onDeleteGroup,
   onAddNode,
   onStartConnection,
   onCompleteConnection,
   onRemoveEdge,
   onClearPendingConnection,
   onUpdateNodeConfig,
+  onAddPortalOutChannel,
+  onUpdatePortalOutChannel,
+  onRemovePortalOutChannel,
+  onAddPortalInChannel,
+  onUpdatePortalInChannel,
+  onRemovePortalInChannel,
+  onRenameNode,
   onDeleteNode,
   onRun,
   isRunningBacktest,
@@ -269,6 +297,10 @@ export function Canvas({
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [liveBoxSelectedNodeIds, setLiveBoxSelectedNodeIds] = useState<string[]>([]);
   const [editingNumberFields, setEditingNumberFields] = useState<Record<string, string>>({});
+  const [editingNodeTitle, setEditingNodeTitle] = useState<{ nodeId: string; value: string } | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingGroupTitle, setEditingGroupTitle] = useState<{ groupId: string; value: string } | null>(null);
+  const groupTitleInputRef = useRef<HTMLInputElement | null>(null);
   const [hoveredHelpTooltip, setHoveredHelpTooltip] = useState<{
     text: string;
     x: number;
@@ -278,8 +310,31 @@ export function Canvas({
   const suppressNodeClickRef = useRef<string | null>(null);
   const suppressCanvasClickRef = useRef(false);
   const suppressNextNodeClickRef = useRef(false);
+  const suppressNextNodeTitleClickRef = useRef(false);
+  const suppressNextGroupTitleClickRef = useRef(false);
   const resizeResultsRef = useRef<{ startY: number; startHeight: number; maxHeight: number; minHeight: number } | null>(null);
   const previewPressRef = useRef<{ pointerId: number; outputKey: string; cancelled: boolean } | null>(null);
+  const groupDragRef = useRef<{
+    pointerId: number;
+    groupId: string;
+    offsetX: number;
+    offsetY: number;
+    nodeIds: string[];
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const groupResizeRef = useRef<{
+    pointerId: number;
+    groupId: string;
+    handle: string;
+    startWidth: number;
+    startHeight: number;
+    startGroupX: number;
+    startGroupY: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
 
   const runFileAction = (action: () => void) => {
     setIsFileMenuOpen(false);
@@ -319,16 +374,58 @@ export function Canvas({
   };
 
   const shouldHideField = (node: GraphNode, fieldKey: string) =>
-    node.type === "trading.execution" && fieldKey === "positionPnlPercent";
+    (node.type === "trading.execution" &&
+      (fieldKey === "positionPnlPercent" ||
+        fieldKey === "longFillAnchor" ||
+        fieldKey === "shortFillAnchor" ||
+        fieldKey === "slippagePct" ||
+        fieldKey === "commissionPct")) ||
+    ((node.type === "utility.portalOut" || node.type === "utility.portalIn") && fieldKey === "channel");
+
+  const getNodeInputs = (node: GraphNode, definition: NodeDefinition | undefined) => {
+    if (node.type === "utility.portalIn") {
+      return buildPortalInInputs(node.config);
+    }
+
+    return definition?.inputs ?? [];
+  };
+
+  const getNodeOutputs = (node: GraphNode, definition: NodeDefinition | undefined) => {
+    if (node.type === "utility.portalOut") {
+      return buildPortalOutOutputs(node.config);
+    }
+
+    return definition?.outputs ?? [];
+  };
+
+  const renderedFieldRowCount = (node: GraphNode, definition: NodeDefinition | undefined) => {
+    if (!definition) {
+      return 0;
+    }
+
+    const visibleFieldCount = definition.fields.filter((field) => !shouldHideField(node, field.key)).length;
+    const hasCombinedFillAnchors =
+      node.type === "trading.execution" &&
+      definition.fields.some((field) => field.key === "longFillAnchor") &&
+      definition.fields.some((field) => field.key === "shortFillAnchor");
+    const hasCombinedSlipCommission =
+      node.type === "trading.execution" &&
+      definition.fields.some((field) => field.key === "slippagePct") &&
+      definition.fields.some((field) => field.key === "commissionPct");
+
+    return visibleFieldCount + (hasCombinedFillAnchors ? 1 : 0) + (hasCombinedSlipCommission ? 1 : 0);
+  };
 
   const nodeHeight = (node: GraphNode, definition: NodeDefinition | undefined) => {
     if (!definition) {
       return 96;
     }
 
-    const portRows = Math.max(definition.inputs.length, definition.outputs.length, 1);
+    const inputs = getNodeInputs(node, definition);
+    const outputs = getNodeOutputs(node, definition);
+    const portRows = Math.max(inputs.length, outputs.length, 1);
     const portsHeight = 14 + portRows * PORT_ROW_HEIGHT + 10;
-    const visibleFieldCount = definition.fields.filter((field) => !shouldHideField(node, field.key)).length;
+    const visibleFieldCount = renderedFieldRowCount(node, definition);
     const fieldsHeight = visibleFieldCount
       ? 14 + visibleFieldCount * FIELD_HEIGHT + Math.max(0, visibleFieldCount - 1) * FIELD_GAP
       : 0;
@@ -452,6 +549,84 @@ export function Canvas({
 
   const getNumberFieldKey = (nodeId: string, fieldKey: string) => `${nodeId}:${fieldKey}`;
 
+  const commitNodeTitle = (nodeId: string, fallbackTitle: string) => {
+    if (!editingNodeTitle || editingNodeTitle.nodeId !== nodeId) {
+      return;
+    }
+
+    const trimmed = editingNodeTitle.value.trim();
+    onRenameNode(nodeId, trimmed || fallbackTitle);
+    setEditingNodeTitle(null);
+  };
+
+  const commitGroupTitle = (groupId: string, fallbackTitle: string) => {
+    if (!editingGroupTitle || editingGroupTitle.groupId !== groupId) {
+      return;
+    }
+
+    const trimmed = editingGroupTitle.value.trim();
+    onRenameGroup(groupId, trimmed || fallbackTitle);
+    setEditingGroupTitle(null);
+  };
+
+  const getNodesInsideGroup = (group: GraphGroup) =>
+    nodes
+      .filter((node) => {
+        const definition = definitionMap.get(node.type);
+        const height = nodeHeight(node, definition);
+        const left = node.position.x;
+        const top = node.position.y;
+        const right = left + NODE_WIDTH;
+        const bottom = top + height;
+        return (
+          left >= group.position.x &&
+          top >= group.position.y + GROUP_HEADER_HEIGHT &&
+          right <= group.position.x + group.size.width &&
+          bottom <= group.position.y + group.size.height
+        );
+      })
+      .map((node) => node.id);
+
+  useEffect(() => {
+    if (!editingNodeTitle) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (titleInputRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      const activeNode = nodes.find((node) => node.id === editingNodeTitle.nodeId);
+      commitNodeTitle(editingNodeTitle.nodeId, activeNode?.title ?? editingNodeTitle.value);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [editingNodeTitle, nodes]);
+
+  useEffect(() => {
+    if (!editingGroupTitle) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (groupTitleInputRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      const activeGroup = groups.find((group) => group.id === editingGroupTitle.groupId);
+      commitGroupTitle(editingGroupTitle.groupId, activeGroup?.title ?? editingGroupTitle.value);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [editingGroupTitle, groups]);
+
   const updateMenuPosition = (clientX: number, clientY: number) => {
     const point = getViewportPoint(clientX, clientY);
     const world = screenToWorld(clientX, clientY);
@@ -501,7 +676,7 @@ export function Canvas({
     }
 
     const definition = definitionMap.get(node.type);
-    const ports = side === "input" ? definition?.inputs ?? [] : definition?.outputs ?? [];
+    const ports = side === "input" ? getNodeInputs(node, definition) : getNodeOutputs(node, definition);
     const index = ports.findIndex((port) => port.id === portId);
 
     if (index === -1) {
@@ -637,6 +812,8 @@ export function Canvas({
     dragMoveStateRef.current = null;
     panStateRef.current = null;
     connectionDragRef.current = null;
+    groupDragRef.current = null;
+    groupResizeRef.current = null;
     setDragPreviewPoint(null);
   };
 
@@ -928,7 +1105,7 @@ export function Canvas({
           setHoveredHelpTooltip(null);
           if (
             event.target instanceof Element &&
-            event.target.closest(".node-card, .context-menu, .run-button, .pending-connection-pill, .canvas-fab")
+            event.target.closest(".node-card, .group-header, .group-delete, .group-resize-handle, .context-menu, .run-button, .pending-connection-pill, .canvas-fab")
           ) {
             return;
           }
@@ -938,6 +1115,7 @@ export function Canvas({
           }
 
           if (event.ctrlKey || event.metaKey) {
+            (document.activeElement as HTMLElement | null)?.blur();
             event.preventDefault();
             try {
               viewportRef.current?.setPointerCapture(event.pointerId);
@@ -959,6 +1137,7 @@ export function Canvas({
             return;
           }
 
+          (document.activeElement as HTMLElement | null)?.blur();
           event.preventDefault();
           try {
             viewportRef.current?.setPointerCapture(event.pointerId);
@@ -981,6 +1160,60 @@ export function Canvas({
             const deltaY = resizeResultsRef.current.startY - event.clientY;
             const { minHeight, maxHeight, startHeight } = resizeResultsRef.current;
             setResultsHeight(Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY)));
+            return;
+          }
+
+          if (groupResizeRef.current && event.pointerId === groupResizeRef.current.pointerId) {
+            const { handle, groupId, startGroupX, startGroupY, startWidth, startHeight, startX, startY } = groupResizeRef.current;
+            const zoom = Math.max(camera.zoom, 0.0001);
+            const rawDeltaX = (event.clientX - startX) / zoom;
+            const rawDeltaY = (event.clientY - startY) / zoom;
+            const snapVal = (v: number) => Math.round(v / 36) * 36;
+            const eastEdge = startGroupX + startWidth;
+            const southEdge = startGroupY + startHeight;
+            const resizesEast = handle === "e" || handle === "ne" || handle === "se";
+            const resizesWest = handle === "w" || handle === "nw" || handle === "sw";
+            const resizesSouth = handle === "s" || handle === "se" || handle === "sw";
+            const resizesNorth = handle === "n" || handle === "ne" || handle === "nw";
+            let newWidth = startWidth;
+            let newHeight = startHeight;
+            let newX = startGroupX;
+            let newY = startGroupY;
+            if (resizesEast) {
+              const raw = Math.max(220, startWidth + rawDeltaX);
+              newWidth = isGridSnapEnabled ? Math.max(220, snapVal(raw)) : raw;
+            } else if (resizesWest) {
+              const raw = Math.max(220, startWidth - rawDeltaX);
+              newWidth = isGridSnapEnabled ? Math.max(220, snapVal(raw)) : raw;
+              newX = eastEdge - newWidth;
+            }
+            if (resizesSouth) {
+              const raw = Math.max(140, startHeight + rawDeltaY);
+              newHeight = isGridSnapEnabled ? Math.max(140, snapVal(raw)) : raw;
+            } else if (resizesNorth) {
+              const raw = Math.max(140, startHeight - rawDeltaY);
+              newHeight = isGridSnapEnabled ? Math.max(140, snapVal(raw)) : raw;
+              newY = southEdge - newHeight;
+            }
+            onResizeGroup(groupId, newX, newY, newWidth, newHeight);
+            return;
+          }
+
+          if (groupDragRef.current && event.pointerId === groupDragRef.current.pointerId) {
+            if (!groupDragRef.current.moved) {
+              const deltaX = event.clientX - groupDragRef.current.startX;
+              const deltaY = event.clientY - groupDragRef.current.startY;
+              if (Math.hypot(deltaX, deltaY) > 3) {
+                groupDragRef.current.moved = true;
+              }
+            }
+            const world = screenToWorld(event.clientX, event.clientY);
+            onMoveGroup(
+              groupDragRef.current.groupId,
+              world.x - groupDragRef.current.offsetX,
+              world.y - groupDragRef.current.offsetY,
+              groupDragRef.current.nodeIds,
+            );
             return;
           }
 
@@ -1080,6 +1313,9 @@ export function Canvas({
         }}
         onPointerUp={(event) => {
           resizeResultsRef.current = null;
+          const didMoveGroup = groupDragRef.current?.moved === true;
+          groupResizeRef.current = null;
+          groupDragRef.current = null;
           setIsResultsResizing(false);
           previewPressRef.current = null;
           if (panStateRef.current?.moved) {
@@ -1087,6 +1323,10 @@ export function Canvas({
           }
           if (dragMoveStateRef.current?.moved) {
             suppressNextNodeClickRef.current = true;
+            suppressNextNodeTitleClickRef.current = true;
+          }
+          if (didMoveGroup) {
+            suppressNextGroupTitleClickRef.current = true;
           }
 
           if (selectionBox) {
@@ -1129,6 +1369,8 @@ export function Canvas({
         }}
         onPointerCancel={(event) => {
           resizeResultsRef.current = null;
+          groupResizeRef.current = null;
+          groupDragRef.current = null;
           setIsResultsResizing(false);
           previewPressRef.current = null;
           selectionBoxDragRef.current = null;
@@ -1142,6 +1384,8 @@ export function Canvas({
         }}
         onLostPointerCapture={() => {
           resizeResultsRef.current = null;
+          groupResizeRef.current = null;
+          groupDragRef.current = null;
           setIsResultsResizing(false);
           previewPressRef.current = null;
           selectionBoxDragRef.current = null;
@@ -1190,6 +1434,118 @@ export function Canvas({
             transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
           }}
         >
+          {groups.map((group) => (
+            <div
+              key={group.id}
+              className="group-card"
+              style={{
+                left: `${WORLD_ORIGIN + group.position.x}px`,
+                top: `${WORLD_ORIGIN + group.position.y}px`,
+                width: `${group.size.width}px`,
+                height: `${group.size.height}px`,
+              }}
+            >
+              <div
+                className="group-header"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  event.preventDefault();
+                  const world = screenToWorld(event.clientX, event.clientY);
+                  try {
+                    viewportRef.current?.setPointerCapture(event.pointerId);
+                  } catch {}
+                  groupDragRef.current = {
+                    pointerId: event.pointerId,
+                    groupId: group.id,
+                    offsetX: world.x - group.position.x,
+                    offsetY: world.y - group.position.y,
+                    nodeIds: getNodesInsideGroup(group),
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    moved: false,
+                  };
+                }}
+              >
+                {editingGroupTitle?.groupId === group.id ? (
+                  <input
+                    ref={groupTitleInputRef}
+                    className="group-title-input"
+                    value={editingGroupTitle.value}
+                    autoFocus
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) =>
+                      setEditingGroupTitle({
+                        groupId: group.id,
+                        value: event.target.value,
+                      })
+                    }
+                    onBlur={() => commitGroupTitle(group.id, group.title)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitGroupTitle(group.id, group.title);
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setEditingGroupTitle(null);
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="group-title-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (suppressNextGroupTitleClickRef.current) {
+                        suppressNextGroupTitleClickRef.current = false;
+                        return;
+                      }
+                      setEditingGroupTitle({ groupId: group.id, value: group.title });
+                    }}
+                  >
+                    {group.title}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="group-delete"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    onDeleteGroup(group.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              {(["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((handle) => (
+                <div
+                  key={handle}
+                  className={`group-resize-handle group-resize-${handle}`}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    try {
+                      viewportRef.current?.setPointerCapture(event.pointerId);
+                    } catch {}
+                    groupResizeRef.current = {
+                      pointerId: event.pointerId,
+                      groupId: group.id,
+                      handle,
+                      startWidth: group.size.width,
+                      startHeight: group.size.height,
+                      startGroupX: group.position.x,
+                      startGroupY: group.position.y,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                    };
+                  }}
+                />
+              ))}
+            </div>
+          ))}
+
           <svg className="edge-layer" width={WORLD_SIZE} height={WORLD_SIZE} aria-hidden="true">
             {edges.map((edge) => {
               const path = buildEdgePath(edge);
@@ -1226,8 +1582,16 @@ export function Canvas({
           {nodes.map((node) => {
             const definition = definitionMap.get(node.type);
             const height = nodeHeight(node, definition);
-            const portRows = Math.max(definition?.inputs.length ?? 0, definition?.outputs.length ?? 0, 1);
+            const inputs = getNodeInputs(node, definition);
+            const outputs = getNodeOutputs(node, definition);
+            const portRows = Math.max(inputs.length, outputs.length, 1);
             const nodeVisibleFields = visibleFields(node, definition);
+            const portalOutChannels = node.type === "utility.portalOut" ? getPortalOutChannels(node.config) : [];
+            const portalInChannels = node.type === "utility.portalIn" ? getPortalInChannels(node.config) : [];
+            const longFillField = definition?.fields.find((field) => field.key === "longFillAnchor");
+            const shortFillField = definition?.fields.find((field) => field.key === "shortFillAnchor");
+            const slippageField = definition?.fields.find((field) => field.key === "slippagePct");
+            const commissionField = definition?.fields.find((field) => field.key === "commissionPct");
 
             return (
               <div
@@ -1288,9 +1652,56 @@ export function Canvas({
                         startY: event.clientY,
                         moved: false,
                       };
-                    }}
-                  >
-                    <span className="node-header-title">{node.title}</span>
+                  }}
+                >
+                    {editingNodeTitle?.nodeId === node.id ? (
+                      <input
+                        ref={titleInputRef}
+                        className="node-header-title-input"
+                        value={editingNodeTitle.value}
+                        autoFocus
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onChange={(event) =>
+                          setEditingNodeTitle({
+                            nodeId: node.id,
+                            value: event.target.value,
+                          })
+                        }
+                        onBlur={() => commitNodeTitle(node.id, node.title)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            commitNodeTitle(node.id, node.title);
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            setEditingNodeTitle(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="node-header-title-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (suppressNextNodeTitleClickRef.current) {
+                            suppressNextNodeTitleClickRef.current = false;
+                            return;
+                          }
+                          setEditingNodeTitle({
+                            nodeId: node.id,
+                            value: node.title,
+                          });
+                        }}
+                      >
+                        <span className="node-header-title">{node.title}</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="node-delete"
@@ -1305,8 +1716,8 @@ export function Canvas({
 
                   <div className="node-body">
                     {Array.from({ length: portRows }).map((_, index) => {
-                    const input = definition?.inputs[index];
-                    const output = definition?.outputs[index];
+                    const input = inputs[index];
+                    const output = outputs[index];
 
                     return (
                       <div key={`${node.id}-row-${index}`} className="port-row">
@@ -1447,10 +1858,14 @@ export function Canvas({
                     })}
                   </div>
 
-                  {nodeVisibleFields.length ? (
+                  {nodeVisibleFields.length || node.type === "utility.portalOut" || node.type === "utility.portalIn" ? (
                     <div className="node-fields">
                       {nodeVisibleFields.map((field) => {
                       const value = node.config[field.key] ?? field.defaultValue;
+                      const isCloseSignalReverseField =
+                        node.type === "output.signal" &&
+                        field.key === "reversePosition" &&
+                        String(node.config.side ?? "long").trim().toLowerCase() === "close";
                       const numberFieldKey = getNumberFieldKey(node.id, field.key);
                       const numberInputValue =
                         field.type === "number" && numberFieldKey in editingNumberFields
@@ -1464,10 +1879,11 @@ export function Canvas({
                           onClick={(event) => event.stopPropagation()}
                         >
                           {field.type === "checkbox" ? (
-                            <span className="node-checkbox-control">
+                            <span className={`node-checkbox-control ${isCloseSignalReverseField ? "is-disabled" : ""}`}>
                               <input
                                 type="checkbox"
                                 checked={Boolean(value)}
+                                disabled={isCloseSignalReverseField}
                                 onChange={(event) => onUpdateNodeConfig(node.id, field.key, event.target.checked)}
                               />
                               <span className="node-field-label">{field.label}</span>
@@ -1589,6 +2005,181 @@ export function Canvas({
                         </label>
                       );
                       })}
+                      {node.type === "trading.execution" && longFillField && shortFillField ? (
+                        <div className="node-field-row-grid">
+                          {[longFillField, shortFillField].map((field) => {
+                            const value = node.config[field.key] ?? field.defaultValue;
+
+                            return (
+                              <label
+                                key={field.key}
+                                className="node-field node-field-compact"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <span className="node-field-label">{field.label}</span>
+                                <select
+                                  value={String(value)}
+                                  onChange={(event) => onUpdateNodeConfig(node.id, field.key, event.target.value)}
+                                >
+                                  {field.options?.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                      {node.type === "trading.execution" && slippageField && commissionField ? (
+                        <div className="node-field-row-grid">
+                          {[slippageField, commissionField].map((field) => {
+                            const value = node.config[field.key] ?? field.defaultValue;
+                            const numberFieldKey = getNumberFieldKey(node.id, field.key);
+                            const numberInputValue =
+                              numberFieldKey in editingNumberFields
+                                ? editingNumberFields[numberFieldKey]
+                                : String(value);
+
+                            return (
+                              <label
+                                key={field.key}
+                                className="node-field node-field-compact"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <span className="node-field-label">{field.label}</span>
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={numberInputValue}
+                                  onFocus={(event) => {
+                                    setEditingNumberFields((current) => ({
+                                      ...current,
+                                      [numberFieldKey]: event.target.value,
+                                    }));
+                                  }}
+                                  onChange={(event) => {
+                                    const nextRaw = event.target.value;
+                                    setEditingNumberFields((current) => ({
+                                      ...current,
+                                      [numberFieldKey]: nextRaw,
+                                    }));
+                                    if (
+                                      nextRaw === "" ||
+                                      nextRaw === "-" ||
+                                      nextRaw === "." ||
+                                      nextRaw === "-." ||
+                                      nextRaw.endsWith(".")
+                                    ) {
+                                      return;
+                                    }
+                                    const parsed = Number(nextRaw);
+                                    if (Number.isFinite(parsed)) {
+                                      onUpdateNodeConfig(node.id, field.key, parsed);
+                                    }
+                                  }}
+                                  onBlur={() => {
+                                    const rawValue = editingNumberFields[numberFieldKey];
+                                    if (rawValue !== undefined) {
+                                      const parsed = Number(rawValue);
+                                      if (rawValue !== "" && Number.isFinite(parsed)) {
+                                        onUpdateNodeConfig(node.id, field.key, parsed);
+                                      }
+                                    }
+                                    setEditingNumberFields((current) => {
+                                      if (!(numberFieldKey in current)) {
+                                        return current;
+                                      }
+                                      const next = { ...current };
+                                      delete next[numberFieldKey];
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                      {node.type === "utility.portalOut" ? (
+                        <div className="portal-channel-list" onClick={(event) => event.stopPropagation()}>
+                          {portalOutChannels.map((channel, index) => (
+                            <label key={`${node.id}-portal-channel-${index}`} className="node-field">
+                              <span className="node-field-label-row">
+                                <span className="node-field-label">Channel {index + 1}</span>
+                                {index > 0 ? (
+                                  <button
+                                    type="button"
+                                    className="portal-channel-delete"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onRemovePortalOutChannel(node.id, index);
+                                    }}
+                                  >
+                                    ×
+                                  </button>
+                                ) : null}
+                              </span>
+                              <input
+                                type="text"
+                                value={channel}
+                                onChange={(event) => onUpdatePortalOutChannel(node.id, index, event.target.value)}
+                              />
+                            </label>
+                          ))}
+                          <button
+                            type="button"
+                            className="portal-channel-add"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onAddPortalOutChannel(node.id);
+                            }}
+                            aria-label="Add channel output"
+                          >
+                            +
+                          </button>
+                        </div>
+                      ) : null}
+                      {node.type === "utility.portalIn" ? (
+                        <div className="portal-channel-list" onClick={(event) => event.stopPropagation()}>
+                          {portalInChannels.map((channel, index) => (
+                            <label key={`${node.id}-portal-in-channel-${index}`} className="node-field">
+                              <span className="node-field-label-row">
+                                <span className="node-field-label">Channel {index + 1}</span>
+                                {index > 0 ? (
+                                  <button
+                                    type="button"
+                                    className="portal-channel-delete"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onRemovePortalInChannel(node.id, index);
+                                    }}
+                                  >
+                                    ×
+                                  </button>
+                                ) : null}
+                              </span>
+                              <input
+                                type="text"
+                                value={channel}
+                                onChange={(event) => onUpdatePortalInChannel(node.id, index, event.target.value)}
+                              />
+                            </label>
+                          ))}
+                          <button
+                            type="button"
+                            className="portal-channel-add"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onAddPortalInChannel(node.id);
+                            }}
+                            aria-label="Add channel input"
+                          >
+                            +
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1820,6 +2411,19 @@ export function Canvas({
                 <button type="button" className="context-menu-back" onClick={() => setMenuCategory(null)}>
                   ← Add Node
                 </button>
+                {menuCategory === "Utility" ? (
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => {
+                      onAddGroup(menuState.worldX, menuState.worldY);
+                      setMenuState(null);
+                      setMenuCategory(null);
+                    }}
+                  >
+                    Group
+                  </button>
+                ) : null}
                 {(menuCategory ? groupedDefinitions[menuCategory] ?? [] : []).map((definition) => (
                   <button
                     key={definition.type}

@@ -53,4 +53,5 @@ export const mockGraph: StrategyGraph = {
     { id: "edge-4", fromNodeId: "node-1", fromPortId: "product", toNodeId: "node-6", toPortId: "product" },
     { id: "edge-5", fromNodeId: "node-5", fromPortId: "signal", toNodeId: "node-6", toPortId: "signals" },
   ],
+  groups: [],
 };

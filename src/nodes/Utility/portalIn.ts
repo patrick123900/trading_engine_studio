@@ -1,4 +1,5 @@
 import type { NodeModule } from "../../core/types";
+import { getPortalInChannels, getPortalInInputId } from "../../core/nodes/portalChannels";
 
 const portalInNode: NodeModule = {
   definition: {
@@ -12,10 +13,23 @@ const portalInNode: NodeModule = {
   },
   executor: {
     type: "utility.portalIn",
-    run: ({ node, inputs }) => ({
-      channel: String(node.config.channel ?? "main"),
-      value: inputs.value,
-    }),
+    run: ({ node, inputs }) => {
+      const channels = getPortalInChannels(node.config);
+      const output: Record<string, unknown> = {
+        channel: channels[0],
+      };
+
+      channels.forEach((channel, index) => {
+        const inputId = getPortalInInputId(index);
+        output[inputId] = inputs[inputId];
+        if (index === 0) {
+          output.value = inputs[inputId];
+        }
+        output[`channel_${index + 1}`] = channel;
+      });
+
+      return output;
+    },
   },
 };
 

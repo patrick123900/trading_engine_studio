@@ -42,7 +42,7 @@ export interface GraphNode {
     x: number;
     y: number;
   };
-  config: Record<string, string | number | boolean>;
+  config: Record<string, string | number | boolean | string[]>;
 }
 
 export interface GraphEdge {
@@ -53,9 +53,23 @@ export interface GraphEdge {
   toPortId: string;
 }
 
+export interface GraphGroup {
+  id: string;
+  title: string;
+  position: {
+    x: number;
+    y: number;
+  };
+  size: {
+    width: number;
+    height: number;
+  };
+}
+
 export interface StrategyGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  groups: GraphGroup[];
 }
 
 export interface GraphCameraState {

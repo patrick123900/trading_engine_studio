@@ -2,6 +2,14 @@ import { Component, useEffect, useMemo, useRef, useState, type ChangeEvent, type
 import { flushSync } from "react-dom";
 import { Canvas } from "./components/Canvas";
 import { runBacktest } from "./core/engine/backtestRunner";
+import {
+  getPortalInChannels,
+  getPortalInInputId,
+  getPortalInInputIndex,
+  getPortalOutChannels,
+  getPortalOutOutputId,
+  getPortalOutOutputIndex,
+} from "./core/nodes/portalChannels";
 import { defaultNodeRegistry } from "./core/nodes/registry";
 import {
   deleteStoredGraph,
@@ -11,7 +19,7 @@ import {
   saveStoredGraph,
   type StoredGraphDocument,
 } from "./core/storage/graphStorage";
-import type { BacktestResult, GraphCameraState, GraphEdge, GraphNode, NodeDefinition, StrategyGraph } from "./core/types";
+import type { BacktestResult, GraphCameraState, GraphEdge, GraphGroup, GraphNode, NodeDefinition, StrategyGraph } from "./core/types";
 
 interface RuntimeLogEntry {
   id: string;
@@ -75,8 +83,23 @@ function makeEdgeId() {
   return `edge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function makeGroupId() {
+  return `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
 function buildNodeFromDefinition(definition: NodeDefinition, x: number, y: number): GraphNode {
-  const config = Object.fromEntries(definition.fields.map((field) => [field.key, field.defaultValue]));
+  const config: GraphNode["config"] = Object.fromEntries(definition.fields.map((field) => [field.key, field.defaultValue]));
+
+  if (definition.type === "utility.portalOut") {
+    const channels = getPortalOutChannels(config);
+    config.channel = channels[0];
+    config.channels = channels;
+  }
+  if (definition.type === "utility.portalIn") {
+    const channels = getPortalInChannels(config);
+    config.channel = channels[0];
+    config.channels = channels;
+  }
 
   return {
     id: `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -98,11 +121,15 @@ function cloneGraph(graph: StrategyGraph): StrategyGraph {
 const DEFAULT_CAMERA: GraphCameraState = { x: 80 - 25000, y: 70 - 25000, zoom: 1 };
 
 function createEmptyGraph(): StrategyGraph {
-  return { nodes: [], edges: [] };
+  return { nodes: [], edges: [], groups: [] };
 }
 
 function normalizeGraph(graph: StrategyGraph): StrategyGraph {
-  const nextGraph = cloneGraph(graph);
+  const clonedGraph = cloneGraph(graph);
+  const nextGraph: StrategyGraph = {
+    ...clonedGraph,
+    groups: Array.isArray((graph as Partial<StrategyGraph>).groups) ? clonedGraph.groups : [],
+  };
   const dataProductSourceNode = nextGraph.nodes.find((node) =>
     ["data.yfinance", "data.ecbFx", "data.alternativeCryptoMarket"].includes(node.type),
   );
@@ -111,6 +138,7 @@ function normalizeGraph(graph: StrategyGraph): StrategyGraph {
   );
 
   let executionNode = nextGraph.nodes.find((node) => node.type === "trading.execution");
+  const executionNodeWasNew = !executionNode;
   if (!executionNode && signalNodes.length > 0) {
     const anchor = signalNodes[signalNodes.length - 1];
     executionNode = {
@@ -127,6 +155,9 @@ function normalizeGraph(graph: StrategyGraph): StrategyGraph {
     const legacyLabel = String(node.config.label ?? "");
     const existingSide = String(node.config.side ?? "").toLowerCase();
     const legacySide =
+      existingSide === "close"
+        ? "close"
+        :
       existingSide === "short" || /short/i.test(legacyLabel)
         ? "short"
         : existingSide === "long"
@@ -140,6 +171,34 @@ function normalizeGraph(graph: StrategyGraph): StrategyGraph {
       side: legacySide,
       reversePosition: Boolean(node.config.reversePosition),
     };
+  });
+
+  nextGraph.nodes = nextGraph.nodes.map((node) => {
+    if (node.type === "utility.portalOut") {
+      const channels = getPortalOutChannels(node.config);
+      return {
+        ...node,
+        config: {
+          ...node.config,
+          channel: channels[0],
+          channels,
+        },
+      };
+    }
+
+    if (node.type === "utility.portalIn") {
+      const channels = getPortalInChannels(node.config);
+      return {
+        ...node,
+        config: {
+          ...node.config,
+          channel: channels[0],
+          channels,
+        },
+      };
+    }
+
+    return node;
   });
 
   nextGraph.edges = nextGraph.edges
@@ -176,6 +235,7 @@ function normalizeGraph(graph: StrategyGraph): StrategyGraph {
 
   if (executionNode) {
     signalNodes.forEach((node) => {
+      if (!executionNodeWasNew) return;
       if (
         !nextGraph.edges.some(
           (edge) =>
@@ -227,7 +287,9 @@ function estimateNodeHeight(node: GraphNode, definitionsByType: Map<string, Node
     return 180;
   }
 
-  const portRows = Math.max(definition.inputs.length, definition.outputs.length, 1);
+  const inputCount = node.type === "utility.portalIn" ? getPortalInChannels(node.config).length : definition.inputs.length;
+  const outputCount = node.type === "utility.portalOut" ? getPortalOutChannels(node.config).length : definition.outputs.length;
+  const portRows = Math.max(inputCount, outputCount, 1);
   const portsHeight = 14 + portRows * ALIGN_PORT_ROW_HEIGHT + 10;
   const fieldsHeight = definition.fields.length
     ? 14 +
@@ -238,39 +300,72 @@ function estimateNodeHeight(node: GraphNode, definitionsByType: Map<string, Node
   return ALIGN_HEADER_HEIGHT + portsHeight + fieldsHeight;
 }
 
-function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, NodeDefinition>): StrategyGraph {
-  if (graph.nodes.length === 0) {
-    return graph;
+function getContainedGroupNodeIds(
+  graph: StrategyGraph,
+  group: GraphGroup,
+  definitionsByType: Map<string, NodeDefinition>,
+  assignedNodeIds = new Set<string>(),
+) {
+  return graph.nodes
+    .filter((node) => {
+      if (assignedNodeIds.has(node.id)) {
+        return false;
+      }
+
+      const height = estimateNodeHeight(node, definitionsByType);
+      const left = node.position.x;
+      const top = node.position.y;
+      const right = left + 250;
+      const bottom = top + height;
+
+      return (
+        left >= group.position.x &&
+        top >= group.position.y &&
+        right <= group.position.x + group.size.width &&
+        bottom <= group.position.y + group.size.height
+      );
+    })
+    .map((node) => node.id);
+}
+
+function layoutNodeSubset(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  definitionsByType: Map<string, NodeDefinition>,
+  targetCenter?: { x: number; y: number },
+) {
+  if (nodes.length === 0) {
+    return new Map<string, { x: number; y: number }>();
   }
 
-  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
-  const currentCenter = graph.nodes.reduce(
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const currentCenter = nodes.reduce(
     (acc, node) => ({
       x: acc.x + node.position.x,
       y: acc.y + node.position.y,
     }),
     { x: 0, y: 0 },
   );
-  currentCenter.x /= graph.nodes.length;
-  currentCenter.y /= graph.nodes.length;
+  currentCenter.x /= nodes.length;
+  currentCenter.y /= nodes.length;
 
   const incomingCount = new Map<string, number>();
   const incoming = new Map<string, string[]>();
   const outgoing = new Map<string, string[]>();
 
-  for (const node of graph.nodes) {
+  for (const node of nodes) {
     incomingCount.set(node.id, 0);
     incoming.set(node.id, []);
     outgoing.set(node.id, []);
   }
 
-  for (const edge of graph.edges) {
+  for (const edge of edges) {
     incomingCount.set(edge.toNodeId, (incomingCount.get(edge.toNodeId) ?? 0) + 1);
     incoming.get(edge.toNodeId)?.push(edge.fromNodeId);
     outgoing.get(edge.fromNodeId)?.push(edge.toNodeId);
   }
 
-  const queue = graph.nodes
+  const queue = nodes
     .filter((node) => (incomingCount.get(node.id) ?? 0) === 0)
     .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
     .map((node) => node.id);
@@ -292,25 +387,25 @@ function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, Nod
     }
   }
 
-  for (const node of graph.nodes) {
+  for (const node of nodes) {
     levels.set(node.id, levels.get(node.id) ?? 0);
   }
 
-  const unprocessed = graph.nodes
+  const unprocessed = nodes
     .filter((node) => !processed.has(node.id))
     .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
   let fallbackLevel = Math.max(0, ...Array.from(levels.values()));
 
   for (const node of unprocessed) {
-    const hasIncoming = graph.edges.some((edge) => edge.toNodeId === node.id);
-    const hasOutgoing = graph.edges.some((edge) => edge.fromNodeId === node.id);
+    const hasIncoming = edges.some((edge) => edge.toNodeId === node.id);
+    const hasOutgoing = edges.some((edge) => edge.fromNodeId === node.id);
     if (!hasIncoming && !hasOutgoing) {
       fallbackLevel += 1;
       levels.set(node.id, fallbackLevel);
       continue;
     }
 
-    const upstreamLevels = graph.edges
+    const upstreamLevels = edges
       .filter((edge) => edge.toNodeId === node.id)
       .map((edge) => levels.get(edge.fromNodeId) ?? 0);
     const nextLevel = upstreamLevels.length > 0 ? Math.max(...upstreamLevels) + 1 : fallbackLevel + 1;
@@ -320,7 +415,7 @@ function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, Nod
 
   // Pull pure source/helper nodes closer to their consumers so constants and side inputs
   // land beside the node they feed instead of all the way in the far-left source column.
-  for (const node of graph.nodes) {
+  for (const node of nodes) {
     const upstream = incoming.get(node.id) ?? [];
     const downstream = outgoing.get(node.id) ?? [];
 
@@ -334,7 +429,7 @@ function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, Nod
   }
 
   const grouped = new Map<number, GraphNode[]>();
-  for (const node of graph.nodes) {
+  for (const node of nodes) {
     const level = levels.get(node.id) ?? 0;
     const bucket = grouped.get(level) ?? [];
     bucket.push(node);
@@ -342,7 +437,6 @@ function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, Nod
   }
 
   const horizontalSpacing = 360;
-  const positioned = new Map<string, GraphNode>();
   const provisionalPositions: Array<{ id: string; x: number; y: number }> = [];
   const orderedLevels = Array.from(grouped.keys()).sort((a, b) => a - b);
   const levelOrders = new Map<number, string[]>(
@@ -429,28 +523,418 @@ function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, Nod
   provisionalCenter.x /= provisionalPositions.length;
   provisionalCenter.y /= provisionalPositions.length;
 
-  const offsetX = currentCenter.x - provisionalCenter.x;
-  const offsetY = currentCenter.y - provisionalCenter.y;
+  const desiredCenter = targetCenter ?? currentCenter;
+  const offsetX = desiredCenter.x - provisionalCenter.x;
+  const offsetY = desiredCenter.y - provisionalCenter.y;
 
-  for (const node of graph.nodes) {
-    const provisional = provisionalPositions.find((entry) => entry.id === node.id);
-    if (!provisional) {
-      positioned.set(node.id, node);
+  return new Map(
+    provisionalPositions.map((entry) => [
+      entry.id,
+      {
+        x: entry.x + offsetX,
+        y: entry.y + offsetY,
+      },
+    ]),
+  );
+}
+
+interface LayoutRectItem {
+  id: string;
+  width: number;
+  height: number;
+  center: { x: number; y: number };
+}
+
+interface LayoutRectEdge {
+  from: string;
+  to: string;
+}
+
+function layoutRectItems(items: LayoutRectItem[], edges: LayoutRectEdge[]) {
+  if (items.length === 0) {
+    return new Map<string, { centerX: number; centerY: number }>();
+  }
+
+  const itemMap = new Map(items.map((item) => [item.id, item]));
+  const incomingCount = new Map<string, number>();
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+
+  for (const item of items) {
+    incomingCount.set(item.id, 0);
+    incoming.set(item.id, []);
+    outgoing.set(item.id, []);
+  }
+
+  for (const edge of edges) {
+    if (!itemMap.has(edge.from) || !itemMap.has(edge.to) || edge.from === edge.to) {
       continue;
     }
 
-    positioned.set(node.id, {
-      ...node,
-      position: {
-        x: provisional.x + offsetX,
-        y: provisional.y + offsetY,
+    incomingCount.set(edge.to, (incomingCount.get(edge.to) ?? 0) + 1);
+    incoming.get(edge.to)?.push(edge.from);
+    outgoing.get(edge.from)?.push(edge.to);
+  }
+
+  const queue = items
+    .filter((item) => (incomingCount.get(item.id) ?? 0) === 0)
+    .sort((a, b) => a.center.x - b.center.x || a.center.y - b.center.y)
+    .map((item) => item.id);
+  const levels = new Map<string, number>();
+  const processed = new Set<string>();
+
+  while (queue.length > 0) {
+    const itemId = queue.shift()!;
+    processed.add(itemId);
+    const level = levels.get(itemId) ?? 0;
+
+    for (const nextId of outgoing.get(itemId) ?? []) {
+      levels.set(nextId, Math.max(levels.get(nextId) ?? 0, level + 1));
+      incomingCount.set(nextId, (incomingCount.get(nextId) ?? 1) - 1);
+      if ((incomingCount.get(nextId) ?? 0) === 0) {
+        queue.push(nextId);
+      }
+    }
+  }
+
+  for (const item of items) {
+    levels.set(item.id, levels.get(item.id) ?? 0);
+  }
+
+  const unprocessed = items
+    .filter((item) => !processed.has(item.id))
+    .sort((a, b) => a.center.x - b.center.x || a.center.y - b.center.y);
+  let fallbackLevel = Math.max(0, ...Array.from(levels.values()));
+
+  for (const item of unprocessed) {
+    const hasIncoming = edges.some((edge) => edge.to === item.id);
+    const hasOutgoing = edges.some((edge) => edge.from === item.id);
+    if (!hasIncoming && !hasOutgoing) {
+      fallbackLevel += 1;
+      levels.set(item.id, fallbackLevel);
+      continue;
+    }
+
+    const upstreamLevels = edges
+      .filter((edge) => edge.to === item.id)
+      .map((edge) => levels.get(edge.from) ?? 0);
+    const nextLevel = upstreamLevels.length > 0 ? Math.max(...upstreamLevels) + 1 : fallbackLevel + 1;
+    fallbackLevel = Math.max(fallbackLevel, nextLevel);
+    levels.set(item.id, nextLevel);
+  }
+
+  const grouped = new Map<number, LayoutRectItem[]>();
+  for (const item of items) {
+    const level = levels.get(item.id) ?? 0;
+    const bucket = grouped.get(level) ?? [];
+    bucket.push(item);
+    grouped.set(level, bucket);
+  }
+
+  const orderedLevels = Array.from(grouped.keys()).sort((a, b) => a - b);
+  const levelOrders = new Map<number, string[]>(
+    orderedLevels.map((level) => [
+      level,
+      [...(grouped.get(level) ?? [])]
+        .sort((a, b) => a.center.y - b.center.y || a.center.x - b.center.x)
+        .map((item) => item.id),
+    ]),
+  );
+
+  const getOrderIndex = () => {
+    const indexMap = new Map<string, number>();
+    for (const [, ids] of levelOrders) {
+      ids.forEach((id, index) => indexMap.set(id, index));
+    }
+    return indexMap;
+  };
+
+  const sortLevelByNeighbors = (level: number, direction: "incoming" | "outgoing") => {
+    const ids = levelOrders.get(level);
+    if (!ids || ids.length <= 1) {
+      return;
+    }
+
+    const currentIndex = getOrderIndex();
+    const getNeighbors = direction === "incoming" ? (itemId: string) => incoming.get(itemId) ?? [] : (itemId: string) => outgoing.get(itemId) ?? [];
+
+    const sorted = [...ids].sort((leftId, rightId) => {
+      const leftNeighbors = getNeighbors(leftId);
+      const rightNeighbors = getNeighbors(rightId);
+
+      const leftScore =
+        leftNeighbors.length > 0
+          ? leftNeighbors.reduce((sum, neighborId) => sum + (currentIndex.get(neighborId) ?? 0), 0) / leftNeighbors.length
+          : Number.POSITIVE_INFINITY;
+      const rightScore =
+        rightNeighbors.length > 0
+          ? rightNeighbors.reduce((sum, neighborId) => sum + (currentIndex.get(neighborId) ?? 0), 0) / rightNeighbors.length
+          : Number.POSITIVE_INFINITY;
+
+      if (leftScore !== rightScore) {
+        return leftScore - rightScore;
+      }
+
+      const leftItem = itemMap.get(leftId);
+      const rightItem = itemMap.get(rightId);
+      return (leftItem?.center.y ?? 0) - (rightItem?.center.y ?? 0);
+    });
+
+    levelOrders.set(level, sorted);
+  };
+
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    orderedLevels.forEach((level) => sortLevelByNeighbors(level, "incoming"));
+    [...orderedLevels].reverse().forEach((level) => sortLevelByNeighbors(level, "outgoing"));
+  }
+
+  const horizontalGap = 160;
+  const verticalGap = 56;
+  const placed = new Map<string, { centerX: number; centerY: number }>();
+  let cursorX = 0;
+
+  for (const level of orderedLevels) {
+    const ids = levelOrders.get(level) ?? [];
+    const itemsAtLevel = ids.map((id) => itemMap.get(id)).filter((item): item is LayoutRectItem => item !== undefined);
+    const levelWidth = Math.max(0, ...itemsAtLevel.map((item) => item.width));
+    const levelCenterX = cursorX + levelWidth / 2;
+    const totalHeight =
+      itemsAtLevel.reduce((sum, item) => sum + item.height, 0) + Math.max(0, itemsAtLevel.length - 1) * verticalGap;
+    let cursorY = -totalHeight / 2;
+
+    for (const item of itemsAtLevel) {
+      const centerY = cursorY + item.height / 2;
+      placed.set(item.id, { centerX: levelCenterX, centerY });
+      cursorY += item.height + verticalGap;
+    }
+
+    cursorX += levelWidth + horizontalGap;
+  }
+
+  const currentCenter = items.reduce(
+    (acc, item) => ({
+      x: acc.x + item.center.x,
+      y: acc.y + item.center.y,
+    }),
+    { x: 0, y: 0 },
+  );
+  currentCenter.x /= items.length;
+  currentCenter.y /= items.length;
+
+  const provisionalCenter = Array.from(placed.values()).reduce(
+    (acc, entry) => ({
+      x: acc.x + entry.centerX,
+      y: acc.y + entry.centerY,
+    }),
+    { x: 0, y: 0 },
+  );
+  provisionalCenter.x /= Math.max(1, placed.size);
+  provisionalCenter.y /= Math.max(1, placed.size);
+
+  const offsetX = currentCenter.x - provisionalCenter.x;
+  const offsetY = currentCenter.y - provisionalCenter.y;
+
+  return new Map(
+    Array.from(placed.entries()).map(([id, entry]) => [
+      id,
+      {
+        centerX: entry.centerX + offsetX,
+        centerY: entry.centerY + offsetY,
+      },
+    ]),
+  );
+}
+
+function autoAlignGraph(graph: StrategyGraph, definitionsByType: Map<string, NodeDefinition>): StrategyGraph {
+  if (graph.nodes.length === 0) {
+    return graph;
+  }
+
+  const nextNodePositions = new Map<string, { x: number; y: number }>();
+  const groupNodeIdsByGroupId = new Map<string, string[]>();
+  const nodeToGroupId = new Map<string, string>();
+  const groupedNodeIds = new Set<string>();
+
+  for (const group of graph.groups) {
+    const nodeIds = getContainedGroupNodeIds(graph, group, definitionsByType, groupedNodeIds);
+    groupNodeIdsByGroupId.set(group.id, nodeIds);
+    for (const nodeId of nodeIds) {
+      nodeToGroupId.set(nodeId, group.id);
+      groupedNodeIds.add(nodeId);
+    }
+
+    if (nodeIds.length === 0) {
+      continue;
+    }
+
+    const subsetNodes = graph.nodes.filter((node) => nodeIds.includes(node.id));
+    const subsetNodeIdSet = new Set(nodeIds);
+    const subsetEdges = graph.edges.filter(
+      (edge) => subsetNodeIdSet.has(edge.fromNodeId) && subsetNodeIdSet.has(edge.toNodeId),
+    );
+    const targetCenter = {
+      x: group.position.x + group.size.width / 2 - 125,
+      y: group.position.y + group.size.height / 2 - 90,
+    };
+    const layout = layoutNodeSubset(subsetNodes, subsetEdges, definitionsByType, targetCenter);
+    layout.forEach((position, nodeId) => {
+      nextNodePositions.set(nodeId, position);
+    });
+  }
+
+  const ungroupedNodes = graph.nodes.filter((node) => !groupedNodeIds.has(node.id));
+  if (ungroupedNodes.length > 0) {
+    const ungroupedNodeIdSet = new Set(ungroupedNodes.map((node) => node.id));
+    const ungroupedEdges = graph.edges.filter(
+      (edge) => ungroupedNodeIdSet.has(edge.fromNodeId) && ungroupedNodeIdSet.has(edge.toNodeId),
+    );
+    const layout = layoutNodeSubset(ungroupedNodes, ungroupedEdges, definitionsByType);
+    layout.forEach((position, nodeId) => {
+      nextNodePositions.set(nodeId, position);
+    });
+  }
+
+  const topLevelItems: LayoutRectItem[] = [];
+  for (const group of graph.groups) {
+    topLevelItems.push({
+      id: `group:${group.id}`,
+      width: group.size.width,
+      height: group.size.height,
+      center: {
+        x: group.position.x + group.size.width / 2,
+        y: group.position.y + group.size.height / 2,
       },
     });
   }
 
+  const topLevelEdges: LayoutRectEdge[] = [];
+  const seenTopLevelEdges = new Set<string>();
+  for (const edge of graph.edges) {
+    const fromGroupId = nodeToGroupId.get(edge.fromNodeId);
+    const toGroupId = nodeToGroupId.get(edge.toNodeId);
+
+    if (!fromGroupId || !toGroupId) {
+      continue;
+    }
+
+    const fromItemId = `group:${fromGroupId}`;
+    const toItemId = `group:${toGroupId}`;
+    if (fromItemId === toItemId) {
+      continue;
+    }
+
+    const edgeKey = `${fromItemId}->${toItemId}`;
+    if (seenTopLevelEdges.has(edgeKey)) {
+      continue;
+    }
+    seenTopLevelEdges.add(edgeKey);
+    topLevelEdges.push({ from: fromItemId, to: toItemId });
+  }
+
+  const topLevelLayout = layoutRectItems(topLevelItems, topLevelEdges);
+
+  const looseNodeRects = ungroupedNodes.map((node) => {
+    const positioned = nextNodePositions.get(node.id) ?? node.position;
+    const height = estimateNodeHeight(node, definitionsByType);
+    return {
+      left: positioned.x,
+      top: positioned.y,
+      right: positioned.x + 250,
+      bottom: positioned.y + height,
+    };
+  });
+
+  const overlapsWithPadding = (
+    left: { left: number; right: number; top: number; bottom: number },
+    right: { left: number; right: number; top: number; bottom: number },
+    padding = 56,
+  ) =>
+    !(
+      left.right + padding <= right.left ||
+      left.left >= right.right + padding ||
+      left.bottom + padding <= right.top ||
+      left.top >= right.bottom + padding
+    );
+
+  const nextGroupPositions = new Map<string, { x: number; y: number }>();
+  const occupiedRects = [...looseNodeRects];
+  const orderedGroups = [...graph.groups].sort((left, right) => {
+    const leftPlaced = topLevelLayout.get(`group:${left.id}`);
+    const rightPlaced = topLevelLayout.get(`group:${right.id}`);
+    const leftX = leftPlaced?.centerX ?? left.position.x + left.size.width / 2;
+    const rightX = rightPlaced?.centerX ?? right.position.x + right.size.width / 2;
+    if (leftX !== rightX) {
+      return leftX - rightX;
+    }
+
+    const leftY = leftPlaced?.centerY ?? left.position.y + left.size.height / 2;
+    const rightY = rightPlaced?.centerY ?? right.position.y + right.size.height / 2;
+    return leftY - rightY;
+  });
+
+  for (const group of orderedGroups) {
+    const itemId = `group:${group.id}`;
+    const placed = topLevelLayout.get(itemId);
+    let x = placed ? placed.centerX - group.size.width / 2 : group.position.x;
+    let y = placed ? placed.centerY - group.size.height / 2 : group.position.y;
+    let rect = {
+      left: x,
+      top: y,
+      right: x + group.size.width,
+      bottom: y + group.size.height,
+    };
+
+    let guard = 0;
+    while (occupiedRects.some((occupied) => overlapsWithPadding(rect, occupied)) && guard < 240) {
+      y += 56;
+      rect = {
+        left: x,
+        top: y,
+        right: x + group.size.width,
+        bottom: y + group.size.height,
+      };
+      guard += 1;
+    }
+
+    nextGroupPositions.set(group.id, { x, y });
+    occupiedRects.push(rect);
+  }
+
+  for (const group of graph.groups) {
+    const nodeIds = groupNodeIdsByGroupId.get(group.id) ?? [];
+    if (nodeIds.length === 0) {
+      continue;
+    }
+
+    const nextGroupPosition = nextGroupPositions.get(group.id);
+    if (!nextGroupPosition) {
+      continue;
+    }
+
+    const deltaX = nextGroupPosition.x - group.position.x;
+    const deltaY = nextGroupPosition.y - group.position.y;
+    for (const nodeId of nodeIds) {
+      const positioned = nextNodePositions.get(nodeId);
+      if (!positioned) {
+        continue;
+      }
+      nextNodePositions.set(nodeId, {
+        x: positioned.x + deltaX,
+        y: positioned.y + deltaY,
+      });
+    }
+  }
+
   return {
     ...graph,
-    nodes: graph.nodes.map((node) => positioned.get(node.id) ?? node),
+    groups: graph.groups.map((group) => ({
+      ...group,
+      position: nextGroupPositions.get(group.id) ?? group.position,
+    })),
+    nodes: graph.nodes.map((node) => ({
+      ...node,
+      position: nextNodePositions.get(node.id) ?? node.position,
+    })),
   };
 }
 
@@ -1137,6 +1621,101 @@ function AppInner() {
     }));
   };
 
+  const addGroupAt = (x: number, y: number) => {
+    const newGroup: GraphGroup = {
+      id: makeGroupId(),
+      title: "Group",
+      position: {
+        x: isGridSnapEnabled ? snapCoordinate(x) : x,
+        y: isGridSnapEnabled ? snapCoordinate(y) : y,
+      },
+      size: {
+        width: 420,
+        height: 260,
+      },
+    };
+
+    commitGraph((current) => ({
+      ...current,
+      groups: [...current.groups, newGroup],
+    }));
+  };
+
+  const moveGroup = (groupId: string, x: number, y: number, nodeIds: string[]) => {
+    const group = graph.groups.find((entry) => entry.id === groupId);
+    if (!group) {
+      return;
+    }
+
+    const nextX = isGridSnapEnabled ? snapCoordinate(x) : x;
+    const nextY = isGridSnapEnabled ? snapCoordinate(y) : y;
+    const deltaX = nextX - group.position.x;
+    const deltaY = nextY - group.position.y;
+    const nodeIdSet = new Set(nodeIds);
+
+    commitGraph((current) => ({
+      ...current,
+      groups: current.groups.map((entry) =>
+        entry.id === groupId
+          ? {
+              ...entry,
+              position: { x: nextX, y: nextY },
+            }
+          : entry,
+      ),
+      nodes: current.nodes.map((node) =>
+        nodeIdSet.has(node.id)
+          ? {
+              ...node,
+              position: {
+                x: node.position.x + deltaX,
+                y: node.position.y + deltaY,
+              },
+            }
+          : node,
+      ),
+    }));
+  };
+
+  const resizeGroup = (groupId: string, x: number, y: number, width: number, height: number) => {
+    commitGraph((current) => ({
+      ...current,
+      groups: current.groups.map((entry) =>
+        entry.id === groupId
+          ? {
+              ...entry,
+              position: { x, y },
+              size: {
+                width: Math.max(220, width),
+                height: Math.max(140, height),
+              },
+            }
+          : entry,
+      ),
+    }));
+  };
+
+  const renameGroup = (groupId: string, title: string) => {
+    commitGraph((current) => ({
+      ...current,
+      groups: current.groups.map((entry) =>
+        entry.id === groupId
+          ? {
+              ...entry,
+              title,
+            }
+          : entry,
+      ),
+    }));
+  };
+
+  const removeGroup = (groupId: string) => {
+    commitGraph((current) => ({
+      ...current,
+      groups: current.groups.filter((entry) => entry.id !== groupId),
+    }));
+  };
+
   const addNodeAt = (definitionType: string, x: number, y: number) => {
     const definition = defaultNodeRegistry.get(definitionType);
     if (!definition) {
@@ -1216,7 +1795,7 @@ function AppInner() {
     }));
   };
 
-  const updateNodeConfig = (nodeId: string, key: string, value: string | number | boolean) => {
+  const updateNodeConfig = (nodeId: string, key: string, value: string | number | boolean | string[]) => {
     commitGraph((current) => ({
       ...current,
       nodes: current.nodes.map((node) =>
@@ -1227,6 +1806,222 @@ function AppInner() {
                 ...node.config,
                 [key]: value,
               },
+            }
+          : node,
+      ),
+    }));
+  };
+
+  const addPortalOutChannel = (nodeId: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || node.type !== "utility.portalOut") {
+          return node;
+        }
+
+        const channels = getPortalOutChannels(node.config);
+        const nextChannels = [...channels, `channel-${channels.length + 1}`];
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            channel: nextChannels[0],
+            channels: nextChannels,
+          },
+        };
+      }),
+    }));
+  };
+
+  const updatePortalOutChannel = (nodeId: string, index: number, value: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || node.type !== "utility.portalOut") {
+          return node;
+        }
+
+        const channels = getPortalOutChannels(node.config);
+        if (index < 0 || index >= channels.length) {
+          return node;
+        }
+
+        const nextChannels = [...channels];
+        nextChannels[index] = value;
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            channel: nextChannels[0],
+            channels: nextChannels,
+          },
+        };
+      }),
+    }));
+  };
+
+  const removePortalOutChannel = (nodeId: string, index: number) => {
+    commitGraph((current) => {
+      const node = current.nodes.find((entry) => entry.id === nodeId && entry.type === "utility.portalOut");
+      if (!node) {
+        return current;
+      }
+
+      const channels = getPortalOutChannels(node.config);
+      if (index <= 0 || index >= channels.length) {
+        return current;
+      }
+
+      const nextChannels = channels.filter((_, channelIndex) => channelIndex !== index);
+      const removedPortId = getPortalOutOutputId(index);
+
+      return {
+        ...current,
+        nodes: current.nodes.map((entry) =>
+          entry.id === nodeId
+            ? {
+                ...entry,
+                config: {
+                  ...entry.config,
+                  channel: nextChannels[0],
+                  channels: nextChannels,
+                },
+              }
+            : entry,
+        ),
+        edges: current.edges
+          .filter((edge) => !(edge.fromNodeId === nodeId && edge.fromPortId === removedPortId))
+          .map((edge) => {
+            if (edge.fromNodeId !== nodeId) {
+              return edge;
+            }
+
+            const outputIndex = getPortalOutOutputIndex(edge.fromPortId);
+            if (outputIndex === null || outputIndex <= index) {
+              return edge;
+            }
+
+            return {
+              ...edge,
+              fromPortId: getPortalOutOutputId(outputIndex - 1),
+            };
+          }),
+      };
+    });
+  };
+
+  const addPortalInChannel = (nodeId: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || node.type !== "utility.portalIn") {
+          return node;
+        }
+
+        const channels = getPortalInChannels(node.config);
+        const nextChannels = [...channels, `channel-${channels.length + 1}`];
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            channel: nextChannels[0],
+            channels: nextChannels,
+          },
+        };
+      }),
+    }));
+  };
+
+  const updatePortalInChannel = (nodeId: string, index: number, value: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || node.type !== "utility.portalIn") {
+          return node;
+        }
+
+        const channels = getPortalInChannels(node.config);
+        if (index < 0 || index >= channels.length) {
+          return node;
+        }
+
+        const nextChannels = [...channels];
+        nextChannels[index] = value;
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            channel: nextChannels[0],
+            channels: nextChannels,
+          },
+        };
+      }),
+    }));
+  };
+
+  const removePortalInChannel = (nodeId: string, index: number) => {
+    commitGraph((current) => {
+      const node = current.nodes.find((entry) => entry.id === nodeId && entry.type === "utility.portalIn");
+      if (!node) {
+        return current;
+      }
+
+      const channels = getPortalInChannels(node.config);
+      if (index <= 0 || index >= channels.length) {
+        return current;
+      }
+
+      const nextChannels = channels.filter((_, channelIndex) => channelIndex !== index);
+      const removedPortId = getPortalInInputId(index);
+
+      return {
+        ...current,
+        nodes: current.nodes.map((entry) =>
+          entry.id === nodeId
+            ? {
+                ...entry,
+                config: {
+                  ...entry.config,
+                  channel: nextChannels[0],
+                  channels: nextChannels,
+                },
+              }
+            : entry,
+        ),
+        edges: current.edges
+          .filter((edge) => !(edge.toNodeId === nodeId && edge.toPortId === removedPortId))
+          .map((edge) => {
+            if (edge.toNodeId !== nodeId) {
+              return edge;
+            }
+
+            const inputIndex = getPortalInInputIndex(edge.toPortId);
+            if (inputIndex === null || inputIndex <= index) {
+              return edge;
+            }
+
+            return {
+              ...edge,
+              toPortId: getPortalInInputId(inputIndex - 1),
+            };
+          }),
+      };
+    });
+  };
+
+  const renameNode = (nodeId: string, title: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) =>
+        node.id === nodeId
+          ? {
+              ...node,
+              title,
             }
           : node,
       ),
@@ -1291,6 +2086,7 @@ function AppInner() {
         edges: graph.edges.filter(
           (edge) => !selectedSet.has(edge.fromNodeId) && !selectedSet.has(edge.toNodeId),
         ),
+        groups: graph.groups,
       },
       { selection: [] },
     );
@@ -1306,6 +2102,7 @@ function AppInner() {
     setPasteCount(nextPasteCount);
     commitGraph(
       (current) => ({
+        ...current,
         nodes: [...current.nodes, ...remapped.nodes],
         edges: [...current.edges, ...remapped.edges],
       }),
@@ -1325,6 +2122,7 @@ function AppInner() {
         edges: graph.edges.filter(
           (edge) => !selectedSet.has(edge.fromNodeId) && !selectedSet.has(edge.toNodeId),
         ),
+        groups: graph.groups,
       },
       { selection: [] },
     );
@@ -1475,6 +2273,7 @@ function AppInner() {
       <Canvas
         nodes={graph.nodes}
         edges={graph.edges}
+        groups={graph.groups}
         definitions={definitions}
         selectedNodeIds={selectedNodeIds}
         pendingConnection={pendingConnection}
@@ -1537,12 +2336,24 @@ function AppInner() {
           });
         }}
         onMoveNode={updateNodePosition}
+        onAddGroup={addGroupAt}
+        onMoveGroup={moveGroup}
+        onResizeGroup={resizeGroup}
+        onRenameGroup={renameGroup}
+        onDeleteGroup={removeGroup}
         onAddNode={addNodeAt}
         onStartConnection={startConnection}
         onCompleteConnection={completeConnection}
         onRemoveEdge={removeEdge}
         onClearPendingConnection={() => setPendingConnection(null)}
         onUpdateNodeConfig={updateNodeConfig}
+        onAddPortalOutChannel={addPortalOutChannel}
+        onUpdatePortalOutChannel={updatePortalOutChannel}
+        onRemovePortalOutChannel={removePortalOutChannel}
+        onAddPortalInChannel={addPortalInChannel}
+        onUpdatePortalInChannel={updatePortalInChannel}
+        onRemovePortalInChannel={removePortalInChannel}
+        onRenameNode={renameNode}
         onDeleteNode={removeNode}
         onRun={runGraph}
         isRunningBacktest={isRunningBacktest}
@@ -1558,6 +2369,10 @@ function AppInner() {
           onAddNode={(definitionType) =>
             addNodeAt(definitionType, viewportCenterRef.current.x - 120, viewportCenterRef.current.y - 80)
           }
+          onAddGroup={() => {
+            addGroupAt(viewportCenterRef.current.x - 210, viewportCenterRef.current.y - 130);
+            setIsNodesLibraryOpen(false);
+          }}
           onClose={() => setIsNodesLibraryOpen(false)}
         />
       ) : null}
@@ -1678,10 +2493,12 @@ function AppInner() {
 function NodesLibraryWindow({
   definitions,
   onAddNode,
+  onAddGroup,
   onClose,
 }: {
   definitions: NodeDefinition[];
   onAddNode: (definitionType: string) => void;
+  onAddGroup: () => void;
   onClose: () => void;
 }) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -1724,20 +2541,30 @@ function NodesLibraryWindow({
     });
   }, [activeCategory, definitions, grouped, search]);
 
+  const showGroupItem = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (needle) {
+      return "group".includes(needle);
+    }
+    return activeCategory === "Utility";
+  }, [search, activeCategory]);
+
+  const totalItemCount = filteredNodes.length + (showGroupItem ? 1 : 0);
+
   useEffect(() => {
     setHighlightedIndex(0);
   }, [activeCategory, search]);
 
   useEffect(() => {
-    if (filteredNodes.length === 0) {
+    if (totalItemCount === 0) {
       setHighlightedIndex(0);
       return;
     }
 
-    if (highlightedIndex > filteredNodes.length - 1) {
-      setHighlightedIndex(filteredNodes.length - 1);
+    if (highlightedIndex > totalItemCount - 1) {
+      setHighlightedIndex(totalItemCount - 1);
     }
-  }, [filteredNodes, highlightedIndex]);
+  }, [totalItemCount, highlightedIndex]);
 
   useEffect(() => {
     const item = itemRefs.current[highlightedIndex];
@@ -1784,27 +2611,32 @@ function NodesLibraryWindow({
                 return;
               }
 
-              if (filteredNodes.length === 0) {
+              if (totalItemCount === 0) {
                 return;
               }
 
               if (event.key === "ArrowDown") {
                 event.preventDefault();
-                setHighlightedIndex((current) => (current + 1) % filteredNodes.length);
+                setHighlightedIndex((current) => (current + 1) % totalItemCount);
                 return;
               }
 
               if (event.key === "ArrowUp") {
                 event.preventDefault();
-                setHighlightedIndex((current) => (current - 1 + filteredNodes.length) % filteredNodes.length);
+                setHighlightedIndex((current) => (current - 1 + totalItemCount) % totalItemCount);
                 return;
               }
 
               if (event.key === "Enter") {
                 event.preventDefault();
-                const definition = filteredNodes[highlightedIndex];
-                if (definition) {
-                  addDefinitionAndClose(definition.type);
+                if (showGroupItem && highlightedIndex === 0) {
+                  onAddGroup();
+                  onClose();
+                } else {
+                  const definition = filteredNodes[highlightedIndex - (showGroupItem ? 1 : 0)];
+                  if (definition) {
+                    addDefinitionAndClose(definition.type);
+                  }
                 }
               }
             }}
@@ -1826,28 +2658,48 @@ function NodesLibraryWindow({
           </aside>
 
           <section ref={listRef} className="nodes-library-list">
-            {filteredNodes.length === 0 ? (
+            {totalItemCount === 0 ? (
               <p className="nodes-library-empty">No nodes matched your search.</p>
             ) : (
-              filteredNodes.map((definition, index) => (
-                <button
-                  key={definition.type}
-                  ref={(element) => {
-                    itemRefs.current[index] = element;
-                  }}
-                  type="button"
-                  className={`nodes-library-card ${index === highlightedIndex ? "is-highlighted" : ""}`}
-                  onMouseEnter={() => setHighlightedIndex(index)}
-                  onClick={() => addDefinitionAndClose(definition.type)}
-                >
-                  <div className="nodes-library-card-top">
-                    <span className="nodes-library-color" style={{ background: definition.color }} />
-                    <strong>{definition.title}</strong>
-                  </div>
-                  <p>{definition.description}</p>
-                  <small>{definition.type}</small>
-                </button>
-              ))
+              <>
+                {showGroupItem ? (
+                  <button
+                    key="__group__"
+                    ref={(element) => { itemRefs.current[0] = element; }}
+                    type="button"
+                    className={`nodes-library-card ${highlightedIndex === 0 ? "is-highlighted" : ""}`}
+                    onMouseEnter={() => setHighlightedIndex(0)}
+                    onClick={() => { onAddGroup(); onClose(); }}
+                  >
+                    <div className="nodes-library-card-top">
+                      <span className="nodes-library-color" style={{ background: "#6b7280" }} />
+                      <strong>Group</strong>
+                    </div>
+                    <p>Create a group container to organise nodes on the canvas.</p>
+                    <small>utility.group</small>
+                  </button>
+                ) : null}
+                {filteredNodes.map((definition, index) => {
+                  const itemIndex = index + (showGroupItem ? 1 : 0);
+                  return (
+                    <button
+                      key={definition.type}
+                      ref={(element) => { itemRefs.current[itemIndex] = element; }}
+                      type="button"
+                      className={`nodes-library-card ${itemIndex === highlightedIndex ? "is-highlighted" : ""}`}
+                      onMouseEnter={() => setHighlightedIndex(itemIndex)}
+                      onClick={() => addDefinitionAndClose(definition.type)}
+                    >
+                      <div className="nodes-library-card-top">
+                        <span className="nodes-library-color" style={{ background: definition.color }} />
+                        <strong>{definition.title}</strong>
+                      </div>
+                      <p>{definition.description}</p>
+                      <small>{definition.type}</small>
+                    </button>
+                  );
+                })}
+              </>
             )}
           </section>
         </div>

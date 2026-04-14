@@ -9,6 +9,13 @@ import type {
 } from "../types";
 import { defaultExecutorRegistry } from "./executors";
 import { defaultNodeRegistry } from "../nodes/registry";
+import {
+  buildPortalOutOutputs,
+  getPortalInChannels,
+  getPortalInInputId,
+  getPortalOutChannels,
+  getPortalOutOutputId,
+} from "../nodes/portalChannels";
 
 interface ValidationIssue {
   message: string;
@@ -21,6 +28,8 @@ interface RunBacktestOptions {
   onNodeError?: (nodeId: string, error: Error) => void;
   stepDelayMs?: number;
 }
+
+type FillAnchor = "open" | "high" | "low" | "close";
 
 interface ExecutionSnapshot {
   outputsByNodeId: Map<string, Record<string, unknown>>;
@@ -106,16 +115,19 @@ function buildExecutionOrder(graph: StrategyGraph) {
     outgoing.get(edge.fromNodeId)?.push(edge.toNodeId);
   }
 
-  const portalInputsByChannel = new Map<string, GraphNode[]>();
+  const portalInputsByChannel = new Map<string, Array<{ node: GraphNode; inputId: string }>>();
   for (const node of graph.nodes) {
     if (node.type !== "utility.portalIn") {
       continue;
     }
 
-    const channel = String(node.config.channel ?? "main").trim();
-    const entries = portalInputsByChannel.get(channel) ?? [];
-    entries.push(node);
-    portalInputsByChannel.set(channel, entries);
+    const channels = getPortalInChannels(node.config);
+    channels.forEach((channel, index) => {
+      const channelKey = channel.toLowerCase();
+      const entries = portalInputsByChannel.get(channelKey) ?? [];
+      entries.push({ node, inputId: getPortalInInputId(index) });
+      portalInputsByChannel.set(channelKey, entries);
+    });
   }
 
   for (const node of graph.nodes) {
@@ -123,15 +135,17 @@ function buildExecutionOrder(graph: StrategyGraph) {
       continue;
     }
 
-    const channel = String(node.config.channel ?? "main").trim();
-    const portalInputs = portalInputsByChannel.get(channel);
-    if (!portalInputs || portalInputs.length !== 1) {
-      continue;
-    }
+    const channels = getPortalOutChannels(node.config);
+    channels.forEach((channel) => {
+      const portalInputs = portalInputsByChannel.get(channel.toLowerCase());
+      if (!portalInputs || portalInputs.length !== 1) {
+        return;
+      }
 
-    const portalInput = portalInputs[0];
-    incomingCount.set(node.id, (incomingCount.get(node.id) ?? 0) + 1);
-    outgoing.get(portalInput.id)?.push(node.id);
+      const portalInput = portalInputs[0];
+      incomingCount.set(node.id, (incomingCount.get(node.id) ?? 0) + 1);
+      outgoing.get(portalInput.node.id)?.push(node.id);
+    });
   }
 
   const queue = graph.nodes
@@ -167,20 +181,82 @@ function buildExecutionOrder(graph: StrategyGraph) {
 }
 
 function getPortalInputMap(graph: StrategyGraph) {
-  const portalInputsByChannel = new Map<string, GraphNode[]>();
+  const portalInputsByChannel = new Map<string, Array<{ node: GraphNode; inputId: string }>>();
 
   for (const node of graph.nodes) {
     if (node.type !== "utility.portalIn") {
       continue;
     }
 
-    const channel = String(node.config.channel ?? "main").trim();
-    const entries = portalInputsByChannel.get(channel) ?? [];
-    entries.push(node);
-    portalInputsByChannel.set(channel, entries);
+    const channels = getPortalInChannels(node.config);
+    channels.forEach((channel, index) => {
+      const channelKey = channel.toLowerCase();
+      const entries = portalInputsByChannel.get(channelKey) ?? [];
+      entries.push({ node, inputId: getPortalInInputId(index) });
+      portalInputsByChannel.set(channelKey, entries);
+    });
   }
 
   return portalInputsByChannel;
+}
+
+function buildNodeInputs(
+  graph: StrategyGraph,
+  node: GraphNode,
+  outputsByNodeId: Map<string, Record<string, unknown>>,
+  portalInputsByChannel: Map<string, Array<{ node: GraphNode; inputId: string }>>,
+) {
+  const definition = defaultNodeRegistry.get(node.type);
+  const inputs = graph.edges
+    .filter((edge) => edge.toNodeId === node.id)
+    .reduce<Record<string, unknown>>((acc, edge) => {
+      const sourceOutput = outputsByNodeId.get(edge.fromNodeId);
+      const nextValue = sourceOutput?.[edge.fromPortId];
+      const portDefinition = definition?.inputs.find((port) => port.id === edge.toPortId);
+
+      if (portDefinition?.allowMultiple) {
+        const currentValues = Array.isArray(acc[edge.toPortId]) ? (acc[edge.toPortId] as unknown[]) : [];
+        acc[edge.toPortId] = [...currentValues, nextValue];
+        return acc;
+      }
+
+      acc[edge.toPortId] = nextValue;
+      return acc;
+    }, {});
+
+  if (node.type === "utility.portalOut") {
+    const channels = getPortalOutChannels(node.config);
+    channels.forEach((channel, index) => {
+      const portalInputs = portalInputsByChannel.get(channel.toLowerCase()) ?? [];
+      if (portalInputs.length > 1) {
+        throw new Error(`Portal channel "${channel}" has multiple Portal In nodes. Use unique channel names.`);
+      }
+
+      const portalInput = portalInputs[0];
+      if (portalInput) {
+        const portalOutput = outputsByNodeId.get(portalInput.node.id);
+        inputs[getPortalOutOutputId(index)] = portalOutput?.[portalInput.inputId];
+      }
+    });
+  }
+
+  return inputs;
+}
+
+async function executeNode(
+  graph: StrategyGraph,
+  node: GraphNode,
+  outputsByNodeId: Map<string, Record<string, unknown>>,
+  portalInputsByChannel: Map<string, Array<{ node: GraphNode; inputId: string }>>,
+) {
+  const executor = defaultExecutorRegistry.get(node.type);
+  if (!executor) {
+    throw new Error(`No executor registered for ${node.type}`);
+  }
+
+  const inputs = buildNodeInputs(graph, node, outputsByNodeId, portalInputsByChannel);
+  const result = await executor.run({ graph, node, inputs });
+  return toOutputRecord(node, result);
 }
 
 async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): Promise<ExecutionSnapshot> {
@@ -194,46 +270,9 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
       await delay(options.stepDelayMs);
     }
 
-    const definition = defaultNodeRegistry.get(node.type);
-    const inputs = graph.edges
-      .filter((edge) => edge.toNodeId === node.id)
-      .reduce<Record<string, unknown>>((acc, edge) => {
-        const sourceOutput = outputsByNodeId.get(edge.fromNodeId);
-        const nextValue = sourceOutput?.[edge.fromPortId];
-        const portDefinition = definition?.inputs.find((port) => port.id === edge.toPortId);
-
-        if (portDefinition?.allowMultiple) {
-          const currentValues = Array.isArray(acc[edge.toPortId]) ? (acc[edge.toPortId] as unknown[]) : [];
-          acc[edge.toPortId] = [...currentValues, nextValue];
-          return acc;
-        }
-
-        acc[edge.toPortId] = nextValue;
-        return acc;
-      }, {});
-
     try {
-      if (node.type === "utility.portalOut") {
-        const channel = String(node.config.channel ?? "main").trim();
-        const portalInputs = portalInputsByChannel.get(channel) ?? [];
-
-        if (portalInputs.length > 1) {
-          throw new Error(`Portal channel "${channel}" has multiple Portal In nodes. Use unique channel names.`);
-        }
-
-        const portalInput = portalInputs[0];
-        if (portalInput) {
-          inputs.value = outputsByNodeId.get(portalInput.id)?.value;
-        }
-      }
-
-      const executor = defaultExecutorRegistry.get(node.type);
-      if (!executor) {
-        throw new Error(`No executor registered for ${node.type}`);
-      }
-
-      const result = await executor.run({ graph, node, inputs });
-      outputsByNodeId.set(node.id, toOutputRecord(node, result));
+      const outputRecord = await executeNode(graph, node, outputsByNodeId, portalInputsByChannel);
+      outputsByNodeId.set(node.id, outputRecord);
       options.onNodeComplete?.(node.id);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
@@ -242,7 +281,38 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
     }
   }
 
-  return { outputsByNodeId, orderedNodes };
+  const snapshot = { outputsByNodeId, orderedNodes };
+  await stabilizeExecutionFeedback(graph, snapshot);
+
+  return snapshot;
+}
+
+async function stabilizeExecutionFeedback(graph: StrategyGraph, snapshot: ExecutionSnapshot) {
+  const executionNode = graph.nodes.find((node) => node.type === "trading.execution");
+  if (!executionNode) {
+    return;
+  }
+
+  const portalInputsByChannel = getPortalInputMap(graph);
+  let previousSignalsKey = "";
+
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    for (const node of snapshot.orderedNodes) {
+      snapshot.outputsByNodeId.set(
+        node.id,
+        await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
+      );
+    }
+
+    const currentSignals = resolveExecutionSignals(graph, snapshot, executionNode.id);
+    const currentSignalsKey = JSON.stringify(currentSignals);
+
+    if (iteration > 0 && currentSignalsKey === previousSignalsKey) {
+      return;
+    }
+
+    previousSignalsKey = currentSignalsKey;
+  }
 }
 
 function computeDrawdown(curve: EquityPoint[]) {
@@ -326,6 +396,32 @@ function applySlippage(price: number, direction: "long" | "short", event: "entry
 
 function applyCommission(equity: number, notional: number, commissionPct: number) {
   return equity - notional * (commissionPct / 100);
+}
+
+function normalizeFillAnchor(value: unknown, fallback: FillAnchor = "open"): FillAnchor {
+  return value === "open" || value === "high" || value === "low" || value === "close" ? value : fallback;
+}
+
+function resolveBarAnchorPrice(
+  dataset: {
+    open?: number[];
+    high?: number[];
+    low?: number[];
+    close?: number[];
+  },
+  index: number,
+  anchor: FillAnchor,
+) {
+  const value =
+    anchor === "high"
+      ? dataset.high?.[index]
+      : anchor === "low"
+        ? dataset.low?.[index]
+        : anchor === "close"
+          ? dataset.close?.[index]
+          : dataset.open?.[index];
+
+  return value ?? dataset.close?.[index] ?? dataset.open?.[index] ?? dataset.high?.[index] ?? dataset.low?.[index] ?? 0;
 }
 
 function resolvePositionNotional(
@@ -445,6 +541,47 @@ function extractSeriesPreview(value: unknown): { values: number[]; timestamps: s
   return null;
 }
 
+function normalizeExecutionSignal(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const signalCandidate =
+    "signal" in value
+      ? (value as { signal?: unknown }).signal
+      : "values" in value
+        ? (value as { values?: unknown }).values
+        : undefined;
+  const side = String((value as { side?: unknown }).side ?? "").trim().toLowerCase();
+  const reversePosition = (value as { reversePosition?: unknown }).reversePosition;
+
+  if (
+    Array.isArray(signalCandidate) &&
+    signalCandidate.every((entry) => typeof entry === "boolean") &&
+    (side === "long" || side === "short" || side === "close")
+  ) {
+    return {
+      signal: signalCandidate,
+      side: side as "long" | "short" | "close",
+      reversePosition: Boolean(reversePosition),
+    };
+  }
+
+  return null;
+}
+
+function resolveExecutionSignals(
+  graph: StrategyGraph,
+  snapshot: ExecutionSnapshot,
+  executionNodeId: string,
+) {
+  return graph.edges
+    .filter((edge) => edge.toNodeId === executionNodeId && edge.toPortId === "signals")
+    .map((edge) => snapshot.outputsByNodeId.get(edge.fromNodeId)?.[edge.fromPortId])
+    .map((value) => normalizeExecutionSignal(value))
+    .filter((value): value is NonNullable<ReturnType<typeof normalizeExecutionSignal>> => value !== null);
+}
+
 function buildPreviewSeriesByEdgeId(graph: StrategyGraph, snapshot: ExecutionSnapshot): Record<string, SeriesPreview> {
   const previews: Record<string, SeriesPreview> = {};
 
@@ -455,7 +592,12 @@ function buildPreviewSeriesByEdgeId(graph: StrategyGraph, snapshot: ExecutionSna
       continue;
     }
 
-    for (const sourcePort of sourceDefinition.outputs) {
+    const sourcePorts =
+      sourceNode.type === "utility.portalOut"
+        ? buildPortalOutOutputs(sourceNode.config)
+        : sourceDefinition.outputs;
+
+    for (const sourcePort of sourcePorts) {
       const outputKey = `${sourceNode.id}:${sourcePort.id}`;
       const sourceValue = outputRecord[sourcePort.id];
     const preview = extractSeriesPreview(sourceValue);
@@ -498,7 +640,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
     };
     signals?: Array<{
       signal?: boolean[];
-      side?: "long" | "short";
+      side?: "long" | "short" | "close";
       reversePosition?: boolean;
     }>;
     settings?: {
@@ -508,19 +650,25 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
       startingCapital?: number;
       positionSizingMode?: "fixed" | "percent";
       positionAmount?: number;
+      longFillAnchor?: FillAnchor;
+      shortFillAnchor?: FillAnchor;
     };
   } | undefined;
   const dataset = resolveExecutionPriceData(graph, snapshot, execution?.product);
 
   const timestamps = dataset?.timestamps ?? [];
   const close = dataset?.close ?? [];
-  const executionSignals = execution?.signals ?? [];
+  const executionSignals = executionNode
+    ? resolveExecutionSignals(graph, snapshot, executionNode.id)
+    : (execution?.signals ?? []);
   const allowShorts = execution?.settings?.allowShorts ?? true;
   const slippagePct = Math.max(0, execution?.settings?.slippagePct ?? 0);
   const commissionPct = Math.max(0, execution?.settings?.commissionPct ?? 0);
   const initialCapital = Math.max(0, execution?.settings?.startingCapital ?? 100000);
   const positionSizingMode = execution?.settings?.positionSizingMode === "fixed" ? "fixed" : "percent";
   const positionAmount = Math.max(0, execution?.settings?.positionAmount ?? 100);
+  const longFillAnchor = normalizeFillAnchor(execution?.settings?.longFillAnchor, "open");
+  const shortFillAnchor = normalizeFillAnchor(execution?.settings?.shortFillAnchor, "open");
 
   if (timestamps.length === 0 || close.length === 0) {
     return {
@@ -554,7 +702,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
   const buyHoldCurve: EquityPoint[] = [];
   const priceSeries: CandlePoint[] = [];
   const executedTrades: Array<{ entryTimestamp: string; exitTimestamp: string; direction: "long" | "short"; pnl: number }> = [];
-  let pendingTransition: "long" | "short" | "flat" | null = null;
+  let pendingAction: { targetDirection: "long" | "short" | "flat"; triggerSide: "long" | "short" } | null = null;
 
   for (let index = 0; index < close.length; index += 1) {
     const price = close[index];
@@ -562,9 +710,11 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
     const previousPrice = close[index - 1] ?? price;
     const barReturn = previousPrice === 0 ? 0 : (price - previousPrice) / previousPrice;
 
-    if (index > 0 && pendingTransition !== null) {
-      if (position && pendingTransition !== position.direction) {
-        const exitPrice = applySlippage(openPrice, position.direction, "exit", slippagePct);
+    if (index > 0 && pendingAction !== null) {
+      const fillAnchor = pendingAction.triggerSide === "long" ? longFillAnchor : shortFillAnchor;
+      const anchoredPrice = resolveBarAnchorPrice(dataset ?? {}, index, fillAnchor);
+      if (position && pendingAction.targetDirection !== position.direction) {
+        const exitPrice = applySlippage(anchoredPrice, position.direction, "exit", slippagePct);
         const realizedBeforeCommission = closePositionAtPrice(cash, position, exitPrice);
         const realizedCash = applyCommission(realizedBeforeCommission, position.quantity * exitPrice, commissionPct);
         const pnl = realizedCash - cash;
@@ -583,21 +733,21 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
         position = null;
       }
 
-      if (!position && pendingTransition !== "flat") {
-        const entryPrice = applySlippage(openPrice, pendingTransition, "entry", slippagePct);
+      if (!position && pendingAction.targetDirection !== "flat") {
+        const entryPrice = applySlippage(anchoredPrice, pendingAction.targetDirection, "entry", slippagePct);
         const positionNotional = resolvePositionNotional(cash, positionSizingMode, positionAmount);
         const quantity = entryPrice > 0 ? positionNotional / entryPrice : 0;
         cash = applyCommission(cash, positionNotional, commissionPct);
         position = {
-          direction: pendingTransition,
+          direction: pendingAction.targetDirection,
           entryPrice: entryPrice,
           quantity,
           entryTimestamp: timestamps[index],
         };
-        tradeMarkers.push({ timestamp: timestamps[index], price: entryPrice, event: "entry", direction: pendingTransition });
+        tradeMarkers.push({ timestamp: timestamps[index], price: entryPrice, event: "entry", direction: pendingAction.targetDirection });
       }
 
-      pendingTransition = null;
+      pendingAction = null;
     }
 
     if (index > 0) {
@@ -621,11 +771,14 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
       close: price,
     });
 
-    const wantsLong = executionSignals.some(
+    let wantsLong = executionSignals.some(
       (signal) => signal.side === "long" && Boolean(signal.signal?.[index]),
     );
-    const wantsShort = executionSignals.some(
+    let wantsShort = executionSignals.some(
       (signal) => signal.side === "short" && Boolean(signal.signal?.[index]),
+    );
+    const wantsClose = executionSignals.some(
+      (signal) => signal.side === "close" && Boolean(signal.signal?.[index]),
     );
     const wantsReverseToLong = executionSignals.some(
       (signal) =>
@@ -639,6 +792,14 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
         signal.reversePosition === true &&
         Boolean(signal.signal?.[index]),
     );
+
+    if (wantsClose) {
+      if (position?.direction === "long") {
+        wantsShort = true;
+      } else if (position?.direction === "short") {
+        wantsLong = true;
+      }
+    }
 
     let desiredDirection: "long" | "short" | "flat";
     if (position?.direction === "long") {
@@ -667,10 +828,16 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
 
     if (position) {
       if (desiredDirection !== position.direction) {
-        pendingTransition = desiredDirection;
+        pendingAction = {
+          targetDirection: desiredDirection,
+          triggerSide: desiredDirection === "flat" ? position.direction : desiredDirection,
+        };
       }
     } else if (desiredDirection !== "flat") {
-      pendingTransition = desiredDirection;
+      pendingAction = {
+        targetDirection: desiredDirection,
+        triggerSide: desiredDirection,
+      };
     }
   }
 
@@ -728,7 +895,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
       `Loaded execution price data for symbol ${execution?.product?.symbol ?? dataset?.symbol ?? "unknown"}.`,
       `Executed ${snapshot.orderedNodes.length} nodes in dependency order.`,
       `Aggregated ${executionSignals.length} signal stream${executionSignals.length === 1 ? "" : "s"} into a target-position model.`,
-      `Execution settings: capital $${initialCapital.toLocaleString()}, sizing ${positionSizingMode === "fixed" ? "$" : ""}${positionAmount}${positionSizingMode === "percent" ? "%" : ""}, slippage ${slippagePct.toFixed(3)}%, commission ${commissionPct.toFixed(3)}%, shorts ${allowShorts ? "enabled" : "disabled"}.`,
+      `Execution settings: capital $${initialCapital.toLocaleString()}, sizing ${positionSizingMode === "fixed" ? "$" : ""}${positionAmount}${positionSizingMode === "percent" ? "%" : ""}, long fill ${longFillAnchor}, short fill ${shortFillAnchor}, slippage ${slippagePct.toFixed(3)}%, commission ${commissionPct.toFixed(3)}%, shorts ${allowShorts ? "enabled" : "disabled"}.`,
       `Generated ${tradeMarkers.filter((marker) => marker.event === "entry").length} entries and ${tradeMarkers.filter((marker) => marker.event === "exit").length} exits.`,
       `Closed ${executedTrades.length} position${executedTrades.length === 1 ? "" : "s"} using next-bar open fills.`,
       `Final strategy equity: $${endingEquity.toLocaleString()}.`,

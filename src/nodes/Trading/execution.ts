@@ -1,5 +1,7 @@
 import type { NodeModule } from "../../core/types";
 
+type FillAnchor = "open" | "high" | "low" | "close";
+
 function normalizeSignalArray(value: unknown) {
   if (!value || typeof value !== "object") {
     return null;
@@ -11,16 +13,16 @@ function normalizeSignalArray(value: unknown) {
       : "values" in value
         ? (value as { values?: unknown }).values
         : undefined;
-  const side = (value as { side?: unknown }).side;
+  const side = String((value as { side?: unknown }).side ?? "").trim().toLowerCase();
   const reversePosition = (value as { reversePosition?: unknown }).reversePosition;
   if (
     Array.isArray(signalCandidate) &&
     signalCandidate.every((entry) => typeof entry === "boolean") &&
-    (side === "long" || side === "short")
+    (side === "long" || side === "short" || side === "close")
   ) {
     return {
       signal: signalCandidate,
-      side: side as "long" | "short",
+      side: side as "long" | "short" | "close",
       reversePosition: Boolean(reversePosition),
     };
   }
@@ -69,6 +71,27 @@ function resolvePositionNotional(
   return mode === "fixed" ? safeAmount : safeCapital * (safeAmount / 100);
 }
 
+function normalizeFillAnchor(value: unknown, fallback: FillAnchor = "open"): FillAnchor {
+  return value === "open" || value === "high" || value === "low" || value === "close" ? value : fallback;
+}
+
+function resolveBarAnchorPrice(
+  priceData: { open: number[]; high: number[]; low: number[]; close: number[] },
+  index: number,
+  anchor: FillAnchor,
+) {
+  const value =
+    anchor === "high"
+      ? priceData.high[index]
+      : anchor === "low"
+        ? priceData.low[index]
+        : anchor === "close"
+          ? priceData.close[index]
+          : priceData.open[index];
+
+  return value ?? priceData.close[index] ?? priceData.open[index] ?? priceData.high[index] ?? priceData.low[index] ?? 0;
+}
+
 function applySlippage(price: number, direction: "long" | "short", event: "entry" | "exit", slippagePct: number) {
   const factor = slippagePct / 100;
 
@@ -84,22 +107,30 @@ function computePositionStateSeries({
   allowShorts,
   close,
   open,
+  high,
+  low,
   slippagePct,
   initialCapital,
   positionSizingMode,
   positionAmount,
   positionPnlPercent,
+  longFillAnchor,
+  shortFillAnchor,
   length,
 }: {
-  signals: Array<{ signal: boolean[]; side: "long" | "short"; reversePosition: boolean }>;
+  signals: Array<{ signal: boolean[]; side: "long" | "short" | "close"; reversePosition: boolean }>;
   allowShorts: boolean;
   close: number[];
   open: number[];
+  high: number[];
+  low: number[];
   slippagePct: number;
   initialCapital: number;
   positionSizingMode: "fixed" | "percent";
   positionAmount: number;
   positionPnlPercent: boolean;
+  longFillAnchor: FillAnchor;
+  shortFillAnchor: FillAnchor;
   length: number;
 }) {
   const longPosition: boolean[] = [];
@@ -109,12 +140,13 @@ function computePositionStateSeries({
   let entryPrice = 0;
   let quantity = 0;
   let capital = initialCapital;
-  let pendingTransition: "long" | "short" | "flat" | null = null;
+  let pendingAction: { targetDirection: "long" | "short" | "flat"; triggerSide: "long" | "short" } | null = null;
 
   for (let index = 0; index < length; index += 1) {
-    if (pendingTransition !== null) {
-      if (currentDirection && pendingTransition !== currentDirection) {
-        const exitReferencePrice = open[index] ?? close[index] ?? close[Math.max(0, index - 1)] ?? 0;
+    if (pendingAction !== null) {
+      const fillAnchor = pendingAction.triggerSide === "long" ? longFillAnchor : shortFillAnchor;
+      if (currentDirection && pendingAction.targetDirection !== currentDirection) {
+        const exitReferencePrice = resolveBarAnchorPrice({ open, high, low, close }, index, fillAnchor);
         const exitPrice = applySlippage(exitReferencePrice, currentDirection, "exit", slippagePct);
         const directionSign = currentDirection === "short" ? -1 : 1;
         capital += (exitPrice - entryPrice) * quantity * directionSign;
@@ -123,16 +155,16 @@ function computePositionStateSeries({
         quantity = 0;
       }
 
-      if (!currentDirection && pendingTransition !== "flat") {
-        const entryReferencePrice = open[index] ?? close[index] ?? 0;
-        const nextEntryPrice = applySlippage(entryReferencePrice, pendingTransition, "entry", slippagePct);
+      if (!currentDirection && pendingAction.targetDirection !== "flat") {
+        const entryReferencePrice = resolveBarAnchorPrice({ open, high, low, close }, index, fillAnchor);
+        const nextEntryPrice = applySlippage(entryReferencePrice, pendingAction.targetDirection, "entry", slippagePct);
         const positionNotional = resolvePositionNotional(capital, positionSizingMode, positionAmount);
         quantity = nextEntryPrice > 0 ? positionNotional / nextEntryPrice : 0;
         entryPrice = nextEntryPrice;
-        currentDirection = pendingTransition;
+        currentDirection = pendingAction.targetDirection;
       }
 
-      pendingTransition = null;
+      pendingAction = null;
     }
 
     longPosition.push(currentDirection === "long");
@@ -149,11 +181,14 @@ function computePositionStateSeries({
       positionPnl.push(Number(pnlValue.toFixed(6)));
     }
 
-    const wantsLong = signals.some(
+    let wantsLong = signals.some(
       (signal) => signal.side === "long" && Boolean(signal.signal[index]),
     );
-    const wantsShort = signals.some(
+    let wantsShort = signals.some(
       (signal) => signal.side === "short" && Boolean(signal.signal[index]),
+    );
+    const wantsClose = signals.some(
+      (signal) => signal.side === "close" && Boolean(signal.signal[index]),
     );
     const wantsReverseToLong = signals.some(
       (signal) => signal.side === "long" && signal.reversePosition && Boolean(signal.signal[index]),
@@ -161,6 +196,19 @@ function computePositionStateSeries({
     const wantsReverseToShort = signals.some(
       (signal) => signal.side === "short" && signal.reversePosition && Boolean(signal.signal[index]),
     );
+
+    // Transform Close signal into opposite signal based on current position
+    // If long with Close → treat as short (to close the long)
+    // If short with Close → treat as long (to close the short)
+    // If flat with Close → do nothing (stays flat)
+    if (wantsClose) {
+      if (currentDirection === "long") {
+        wantsShort = true;
+      } else if (currentDirection === "short") {
+        wantsLong = true;
+      }
+      // If flat, wantsClose has no effect (stays flat)
+    }
 
     let desiredDirection: "long" | "short" | "flat";
     if (currentDirection === "long") {
@@ -189,10 +237,16 @@ function computePositionStateSeries({
 
     if (currentDirection) {
       if (desiredDirection !== currentDirection) {
-        pendingTransition = desiredDirection;
+        pendingAction = {
+          targetDirection: desiredDirection,
+          triggerSide: desiredDirection === "flat" ? currentDirection : desiredDirection,
+        };
       }
     } else if (desiredDirection !== "flat") {
-      pendingTransition = desiredDirection;
+      pendingAction = {
+        targetDirection: desiredDirection,
+        triggerSide: desiredDirection,
+      };
     }
   }
 
@@ -235,6 +289,30 @@ const executionNode: NodeModule = {
         defaultValue: false,
       },
       {
+        key: "longFillAnchor",
+        label: "Long Fill",
+        type: "select",
+        defaultValue: "open",
+        options: [
+          { label: "Open", value: "open" },
+          { label: "High", value: "high" },
+          { label: "Low", value: "low" },
+          { label: "Close", value: "close" },
+        ],
+      },
+      {
+        key: "shortFillAnchor",
+        label: "Short Fill",
+        type: "select",
+        defaultValue: "open",
+        options: [
+          { label: "Open", value: "open" },
+          { label: "High", value: "high" },
+          { label: "Low", value: "low" },
+          { label: "Close", value: "close" },
+        ],
+      },
+      {
         key: "allowShorts",
         label: "Allow Shorts",
         type: "checkbox",
@@ -269,7 +347,17 @@ const executionNode: NodeModule = {
       const allowShorts = Boolean(node.config.allowShorts ?? true);
       const marketData =
         product && typeof product === "object" && "marketData" in product
-          ? ((product as { marketData?: { timestamps?: unknown; close?: unknown; open?: unknown } }).marketData ?? {})
+          ? ((
+              product as {
+                marketData?: {
+                  timestamps?: unknown;
+                  close?: unknown;
+                  open?: unknown;
+                  high?: unknown;
+                  low?: unknown;
+                };
+              }
+            ).marketData ?? {})
           : {};
       const timestamps =
         Array.isArray(marketData.timestamps)
@@ -283,6 +371,14 @@ const executionNode: NodeModule = {
         Array.isArray(marketData.open) && marketData.open.every((entry) => typeof entry === "number")
           ? marketData.open
           : close;
+      const high =
+        Array.isArray(marketData.high) && marketData.high.every((entry: unknown) => typeof entry === "number")
+          ? marketData.high
+          : close;
+      const low =
+        Array.isArray(marketData.low) && marketData.low.every((entry: unknown) => typeof entry === "number")
+          ? marketData.low
+          : close;
       const slippagePct = Math.max(0, Number(node.config.slippagePct ?? 0));
       const commissionPct = Math.max(0, Number(node.config.commissionPct ?? 0));
       const startingCapital = Math.max(0, readNumber(node.config.startingCapital, 100000));
@@ -294,6 +390,8 @@ const executionNode: NodeModule = {
       const positionSizingMode = parsedPositionAmount.mode;
       const positionAmount = parsedPositionAmount.amount;
       const positionPnlPercent = Boolean(node.config.positionPnlPercent ?? false);
+      const longFillAnchor = normalizeFillAnchor(node.config.longFillAnchor, "open");
+      const shortFillAnchor = normalizeFillAnchor(node.config.shortFillAnchor, "open");
       const length = Math.max(
         timestamps.length,
         close.length,
@@ -305,11 +403,15 @@ const executionNode: NodeModule = {
         allowShorts,
         close,
         open,
+        high,
+        low,
         slippagePct,
         initialCapital: startingCapital,
         positionSizingMode,
         positionAmount,
         positionPnlPercent,
+        longFillAnchor,
+        shortFillAnchor,
         length,
       });
 
@@ -324,6 +426,8 @@ const executionNode: NodeModule = {
           positionSizingMode,
           positionAmount,
           positionPnlPercent,
+          longFillAnchor,
+          shortFillAnchor,
         },
         longPosition: {
           values: positionState.longPosition,

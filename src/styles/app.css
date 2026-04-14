@@ -273,7 +273,7 @@ select {
   inset: 0;
   width: 100%;
   height: 100%;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .edge-shadow {
@@ -354,6 +354,93 @@ select {
   background: linear-gradient(180deg, rgb(60, 64, 74), rgb(34, 36, 42));
 }
 
+.group-card {
+  position: absolute;
+  border: 1.5px solid rgba(148, 163, 184, 0.45);
+  border-radius: 16px;
+  background: rgba(69, 77, 91, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(36, 42, 52, 0.38);
+  cursor: grab;
+}
+
+.group-title-button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: calc(100% - 30px);
+  border: 0;
+  background: transparent;
+  color: #d7e0ea;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0;
+  cursor: text;
+}
+
+.group-title-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(14, 18, 24, 0.22);
+  color: #f7fbff;
+  padding: 0 7px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  outline: none;
+}
+
+.group-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.14);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.group-resize-handle {
+  position: absolute;
+  z-index: 2;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.group-resize-handle:hover {
+  background: rgba(191, 219, 254, 0.14);
+  border-radius: 3px;
+}
+
+.group-resize-n  { top: -5px;    left: 16px;   right: 16px;  height: 10px; cursor: n-resize; }
+.group-resize-s  { bottom: -5px; left: 16px;   right: 16px;  height: 10px; cursor: s-resize; }
+.group-resize-e  { top: 16px;    right: -5px;  bottom: 16px; width:  10px; cursor: e-resize; }
+.group-resize-w  { top: 16px;    left: -5px;   bottom: 16px; width:  10px; cursor: w-resize; }
+.group-resize-nw { top: -5px;    left: -5px;   width: 20px;  height: 20px; cursor: nw-resize; }
+.group-resize-ne { top: -5px;    right: -5px;  width: 20px;  height: 20px; cursor: ne-resize; }
+.group-resize-sw { bottom: -5px; left: -5px;   width: 20px;  height: 20px; cursor: sw-resize; }
+.group-resize-se { bottom: -5px; right: -5px;  width: 20px;  height: 20px; cursor: se-resize; }
+
 .node-card.is-selected {
   box-shadow:
     0 0 0 1px rgba(111, 179, 255, 0.95),
@@ -397,6 +484,48 @@ select {
   font-size: 0.85rem;
 }
 
+.node-header-title-button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: calc(100% - 36px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: text;
+}
+
+.node-header-title-button .node-header-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-header-title-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(14, 18, 24, 0.26);
+  color: #f7fbff;
+  padding: 0 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  outline: none;
+}
+
+.node-header-title-input:focus {
+  border-color: rgba(191, 219, 254, 0.5);
+  box-shadow: 0 0 0 2px rgba(191, 219, 254, 0.12);
+}
+
 .node-delete {
   display: inline-flex;
   align-items: center;
@@ -422,6 +551,20 @@ select {
 .node-field {
   display: grid;
   gap: 6px;
+}
+
+.node-field-row-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.node-field-compact {
+  min-width: 0;
+}
+
+.node-field-compact select {
+  min-width: 0;
 }
 
 .node-field.is-checkbox {
@@ -539,6 +682,10 @@ select {
   min-height: 28px;
 }
 
+.node-checkbox-control.is-disabled {
+  opacity: 0.45;
+}
+
 .node-checkbox-control .node-field-label {
   font-size: 0.71rem;
   line-height: 1;
@@ -570,6 +717,39 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.portal-channel-list {
+  display: grid;
+  gap: 8px;
+}
+
+.portal-channel-delete {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #d3dbe8;
+  line-height: 1;
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+}
+
+.portal-channel-add {
+  justify-self: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(20, 22, 27, 0.9);
+  color: #e6edf8;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
 }
 
 .node-checkbox-control input[type="checkbox"] {

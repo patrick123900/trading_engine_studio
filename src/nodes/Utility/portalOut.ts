@@ -1,4 +1,5 @@
 import type { NodeModule } from "../../core/types";
+import { getPortalOutChannels, getPortalOutOutputId } from "../../core/nodes/portalChannels";
 
 const portalOutNode: NodeModule = {
   definition: {
@@ -13,13 +14,15 @@ const portalOutNode: NodeModule = {
   executor: {
     type: "utility.portalOut",
     run: ({ inputs, node }) => {
-      if (!("value" in inputs)) {
-        throw new Error(`Portal Out "${String(node.config.channel ?? "main")}" has no matching Portal In.`);
-      }
+      const channels = getPortalOutChannels(node.config);
+      const outputs: Record<string, unknown> = {};
 
-      return {
-        value: inputs.value,
-      };
+      channels.forEach((channel, index) => {
+        const outputId = getPortalOutOutputId(index);
+        outputs[outputId] = outputId in inputs ? inputs[outputId] : undefined;
+      });
+
+      return outputs;
     },
   },
 };

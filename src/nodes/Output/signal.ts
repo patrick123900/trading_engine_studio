@@ -17,6 +17,7 @@ const signalNode: NodeModule = {
         options: [
           { label: "Long", value: "long" },
           { label: "Short", value: "short" },
+          { label: "Close", value: "close" },
         ],
       },
       {
@@ -30,6 +31,7 @@ const signalNode: NodeModule = {
   executor: {
     type: "output.signal",
     run: ({ inputs, node }) => {
+      const normalizedSide = String(node.config.side ?? "long").trim().toLowerCase();
       const input =
         Array.isArray(inputs.signal)
           ? inputs.signal
@@ -42,11 +44,12 @@ const signalNode: NodeModule = {
       }
 
       const edgeTriggeredValues = input.map((value, index) => value && !Boolean(input[index - 1]));
+      const signalValues = normalizedSide === "close" ? input.map((value) => Boolean(value)) : edgeTriggeredValues;
 
       return {
         signal: {
-          values: edgeTriggeredValues,
-          side: String(node.config.side ?? "long"),
+          values: signalValues,
+          side: normalizedSide,
           reversePosition: Boolean(node.config.reversePosition),
         },
       };
