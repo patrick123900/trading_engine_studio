@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { BacktestResult, CandlePoint, EquityPoint, SeriesPreview, TradeMarker } from "../core/types";
 
 interface ResultsPanelProps {
@@ -225,7 +225,7 @@ function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], widt
   return bands;
 }
 
-export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange }: ResultsPanelProps) {
+export const ResultsPanel = memo(function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange }: ResultsPanelProps) {
   const metricsShellRef = useRef<HTMLDivElement | null>(null);
   const chartWidth = 900;
   const chartHeight = 280;
@@ -463,4 +463,4 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
       </div>
     </section>
   );
-}
+});
