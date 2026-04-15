@@ -112,6 +112,7 @@ export interface TradeMarker {
   price: number;
   event: "entry" | "exit";
   direction: "long" | "short";
+  pnl?: number;
 }
 
 export interface TradeSummary {

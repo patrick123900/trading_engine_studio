@@ -723,7 +723,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
         if (pnl >= 0) {
           winningTrades += 1;
         }
-        tradeMarkers.push({ timestamp: timestamps[index], price: exitPrice, event: "exit", direction: position.direction });
+        tradeMarkers.push({ timestamp: timestamps[index], price: exitPrice, event: "exit", direction: position.direction, pnl: Number(pnl.toFixed(2)) });
         executedTrades.push({
           entryTimestamp: position.entryTimestamp,
           exitTimestamp: timestamps[index],
@@ -853,7 +853,7 @@ function buildBacktestResult(graph: StrategyGraph, snapshot: ExecutionSnapshot):
     if (pnl >= 0) {
       winningTrades += 1;
     }
-    tradeMarkers.push({ timestamp: finalTimestamp, price: exitPrice, event: "exit", direction: position.direction });
+    tradeMarkers.push({ timestamp: finalTimestamp, price: exitPrice, event: "exit", direction: position.direction, pnl: Number(pnl.toFixed(2)) });
     executedTrades.push({
       entryTimestamp: position.entryTimestamp,
       exitTimestamp: finalTimestamp,

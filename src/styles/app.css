@@ -971,6 +971,46 @@ select {
     0 12px 30px rgba(0, 0, 0, 0.32);
 }
 
+.zoom-slider-stack {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.25;
+  transition: opacity 140ms ease;
+}
+
+.zoom-slider-stack:hover {
+  opacity: 0.5;
+}
+
+.zoom-slider-icon {
+  width: 14px;
+  height: 14px;
+  color: #eef4fb;
+}
+
+.zoom-slider-track-wrap {
+  position: relative;
+  width: 16px;
+  height: 132px;
+}
+
+.zoom-slider {
+  width: 16px;
+  height: 132px;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  background: transparent;
+  outline: none;
+  position: relative;
+  z-index: 2;
+}
+
 .run-button.is-running {
   filter: saturate(1.15);
   box-shadow:
@@ -1783,6 +1823,26 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.export-csv-button {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #7eb8f7;
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.export-csv-button:hover {
+  background: rgba(96, 165, 250, 0.15);
+  border-color: rgba(96, 165, 250, 0.35);
+  color: #bfdbfe;
 }
 
 .results-chart-legend {

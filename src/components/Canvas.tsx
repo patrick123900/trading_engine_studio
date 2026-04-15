@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import {
   ChevronDownIcon,
   ChevronUpIcon,
+  MagnifyingGlassIcon,
   PlayIcon,
   RectangleGroupIcon,
   Squares2X2Icon,
@@ -135,6 +136,11 @@ const PORT_DOT_SIZE = 10;
 const PORT_RADIUS = PORT_DOT_SIZE / 2;
 const WORLD_SIZE = 50000;
 const WORLD_ORIGIN = WORLD_SIZE / 2;
+const MIN_ZOOM = 0.45;
+const MAX_ZOOM = 2.2;
+const ZOOM_SLIDER_MIN = 0;
+const ZOOM_SLIDER_MAX = 100;
+const ZOOM_SLIDER_MID = 50;
 function clampCamera(
   nextCamera: { x: number; y: number; zoom: number },
   canvasSize: { width: number; height: number },
@@ -470,7 +476,7 @@ export function Canvas({
     const boundsHeight = Math.max(1, bounds.maxY - bounds.minY);
     const availableWidth = Math.max(1, canvasSize.width - padding * 2);
     const availableHeight = Math.max(1, canvasSize.height - padding * 2);
-    const nextZoom = Math.min(2.2, Math.max(0.45, Math.min(availableWidth / boundsWidth, availableHeight / boundsHeight)));
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(availableWidth / boundsWidth, availableHeight / boundsHeight)));
     const centerX = bounds.minX + boundsWidth / 2;
     const centerY = bounds.minY + boundsHeight / 2;
 
@@ -537,6 +543,54 @@ export function Canvas({
       x: (canvasSize.width / 2 - activeCamera.x) / activeCamera.zoom - WORLD_ORIGIN,
       y: (canvasSize.height / 2 - activeCamera.y) / activeCamera.zoom - WORLD_ORIGIN,
     };
+  };
+
+  const defaultZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, initialCamera.zoom));
+
+  const zoomToSliderValue = (zoom: number) => {
+    const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+    if (clampedZoom <= defaultZoom) {
+      const denominator = Math.max(defaultZoom - MIN_ZOOM, Number.EPSILON);
+      return ZOOM_SLIDER_MIN + ((clampedZoom - MIN_ZOOM) / denominator) * (ZOOM_SLIDER_MID - ZOOM_SLIDER_MIN);
+    }
+
+    const denominator = Math.max(MAX_ZOOM - defaultZoom, Number.EPSILON);
+    return ZOOM_SLIDER_MID + ((clampedZoom - defaultZoom) / denominator) * (ZOOM_SLIDER_MAX - ZOOM_SLIDER_MID);
+  };
+
+  const sliderValueToZoom = (sliderValue: number) => {
+    const clampedSlider = Math.min(ZOOM_SLIDER_MAX, Math.max(ZOOM_SLIDER_MIN, sliderValue));
+    if (clampedSlider <= ZOOM_SLIDER_MID) {
+      const ratio = (clampedSlider - ZOOM_SLIDER_MIN) / Math.max(ZOOM_SLIDER_MID - ZOOM_SLIDER_MIN, Number.EPSILON);
+      return MIN_ZOOM + ratio * (defaultZoom - MIN_ZOOM);
+    }
+
+    const ratio = (clampedSlider - ZOOM_SLIDER_MID) / Math.max(ZOOM_SLIDER_MAX - ZOOM_SLIDER_MID, Number.EPSILON);
+    return defaultZoom + ratio * (MAX_ZOOM - defaultZoom);
+  };
+
+  const setZoomAtViewportCenter = (nextZoom: number) => {
+    setCamera((current) => {
+      const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, nextZoom));
+      const worldX = (canvasSize.width / 2 - current.x) / current.zoom;
+      const worldY = (canvasSize.height / 2 - current.y) / current.zoom;
+      const nextCamera = clampCamera(
+        {
+          zoom: clampedZoom,
+          x: canvasSize.width / 2 - worldX * clampedZoom,
+          y: canvasSize.height / 2 - worldY * clampedZoom,
+        },
+        canvasSize,
+      );
+      cameraRef.current = nextCamera;
+      return nextCamera;
+    });
+  };
+
+  const handleZoomSliderChange = (rawValue: number) => {
+    const snapThreshold = 4;
+    const snappedValue = Math.abs(rawValue - ZOOM_SLIDER_MID) <= snapThreshold ? ZOOM_SLIDER_MID : rawValue;
+    setZoomAtViewportCenter(sliderValueToZoom(snappedValue));
   };
 
   const visibleFields = (node: GraphNode, definition: NodeDefinition | undefined) => {
@@ -1105,7 +1159,7 @@ export function Canvas({
           setHoveredHelpTooltip(null);
           if (
             event.target instanceof Element &&
-            event.target.closest(".node-card, .group-header, .group-delete, .group-resize-handle, .context-menu, .run-button, .pending-connection-pill, .canvas-fab")
+            event.target.closest(".node-card, .group-header, .group-delete, .group-resize-handle, .context-menu, .run-button, .pending-connection-pill, .canvas-fab, .zoom-slider-stack")
           ) {
             return;
           }
@@ -1400,7 +1454,7 @@ export function Canvas({
           }
           const point = getViewportPoint(event.clientX, event.clientY);
           setCamera((current) => {
-            const nextZoom = Math.min(2.2, Math.max(0.45, current.zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
+            const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
             const worldX = (point.x - current.x) / current.zoom;
             const worldY = (point.y - current.y) / current.zoom;
             const nextCamera = clampCamera(
@@ -1449,11 +1503,7 @@ export function Canvas({
                 className="group-header"
                 onPointerDown={(event) => {
                   event.stopPropagation();
-                  event.preventDefault();
                   const world = screenToWorld(event.clientX, event.clientY);
-                  try {
-                    viewportRef.current?.setPointerCapture(event.pointerId);
-                  } catch {}
                   groupDragRef.current = {
                     pointerId: event.pointerId,
                     groupId: group.id,
@@ -2299,6 +2349,29 @@ export function Canvas({
           >
             <Squares2X2Icon className="control-icon" />
           </button>
+        </div>
+
+        <div
+          className="zoom-slider-stack"
+          onPointerDown={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <MagnifyingGlassIcon className="zoom-slider-icon" aria-hidden="true" />
+          <div className="zoom-slider-track-wrap">
+            <input
+              type="range"
+              className="zoom-slider"
+              min={ZOOM_SLIDER_MIN}
+              max={ZOOM_SLIDER_MAX}
+              step={1}
+              value={Math.round(zoomToSliderValue(camera.zoom))}
+              onChange={(event) => {
+                handleZoomSliderChange(Number(event.target.value));
+              }}
+              aria-label="Zoom"
+            />
+          </div>
         </div>
 
         <button

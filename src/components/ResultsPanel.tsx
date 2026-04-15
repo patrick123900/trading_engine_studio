@@ -79,6 +79,110 @@ function previewColor(index: number) {
   return palette[index % palette.length];
 }
 
+function buildTrades(markers: TradeMarker[], candles: CandlePoint[]) {
+  const indexByTimestamp = new Map(candles.map((c, i) => [c.timestamp, i]));
+  const candleByTimestamp = new Map(candles.map((c) => [c.timestamp, c]));
+  const openByDirection: Partial<Record<"long" | "short", TradeMarker>> = {};
+  const trades: Array<{
+    entry: TradeMarker;
+    exit: TradeMarker | null;
+    entryCandle: CandlePoint | undefined;
+    exitCandle: CandlePoint | undefined;
+    entryBar: number;
+    exitBar: number | null;
+  }> = [];
+
+  for (const marker of markers) {
+    if (marker.event === "entry") {
+      openByDirection[marker.direction] = marker;
+    } else {
+      const entry = openByDirection[marker.direction];
+      if (entry) {
+        trades.push({
+          entry,
+          exit: marker,
+          entryCandle: candleByTimestamp.get(entry.timestamp),
+          exitCandle: candleByTimestamp.get(marker.timestamp),
+          entryBar: (indexByTimestamp.get(entry.timestamp) ?? -1) + 1,
+          exitBar: (indexByTimestamp.get(marker.timestamp) ?? -1) + 1,
+        });
+        delete openByDirection[marker.direction];
+      }
+    }
+  }
+
+  for (const entry of Object.values(openByDirection)) {
+    if (entry) {
+      trades.push({
+        entry,
+        exit: null,
+        entryCandle: candleByTimestamp.get(entry.timestamp),
+        exitCandle: undefined,
+        entryBar: (indexByTimestamp.get(entry.timestamp) ?? -1) + 1,
+        exitBar: null,
+      });
+    }
+  }
+
+  return trades;
+}
+
+function exportTradesToCSV(result: BacktestResult) {
+  const trades = buildTrades(result.tradeMarkers, result.priceSeries);
+
+  const headers = [
+    "ID", "Direction",
+    "Entry Bar", "Entry Price", "Entry Open", "Entry High", "Entry Low", "Entry Close",
+    "Exit Bar", "Exit Price", "Exit Open", "Exit High", "Exit Low", "Exit Close",
+    "PnL", "Total Bars",
+  ];
+
+  const rows = trades.map((trade, index) => {
+    const entryPrice = trade.entry.price;
+    const exitPrice = trade.exit?.price ?? null;
+    const pnlMoney =
+      trade.exit !== null && trade.exit.pnl !== undefined
+        ? trade.exit.pnl.toFixed(2)
+        : exitPrice !== null
+        ? trade.entry.direction === "long"
+          ? ((exitPrice - entryPrice) * 1).toFixed(2)
+          : ((entryPrice - exitPrice) * 1).toFixed(2)
+        : "";
+    const totalBars = trade.exitBar !== null ? trade.exitBar - trade.entryBar : "";
+
+    return [
+      index + 1,
+      trade.entry.direction === "long" ? "Long" : "Short",
+      trade.entryBar,
+      entryPrice.toFixed(4),
+      trade.entryCandle?.open.toFixed(4) ?? "",
+      trade.entryCandle?.high.toFixed(4) ?? "",
+      trade.entryCandle?.low.toFixed(4) ?? "",
+      trade.entryCandle?.close.toFixed(4) ?? "",
+      trade.exitBar ?? "",
+      exitPrice !== null ? exitPrice.toFixed(4) : "",
+      trade.exitCandle?.open.toFixed(4) ?? "",
+      trade.exitCandle?.high.toFixed(4) ?? "",
+      trade.exitCandle?.low.toFixed(4) ?? "",
+      trade.exitCandle?.close.toFixed(4) ?? "",
+      pnlMoney,
+      totalBars,
+    ];
+  });
+
+  const csv = [headers, ...rows]
+    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${result.graphName || "backtest"}_trades.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], width: number) {
   const indexByTimestamp = new Map(candles.map((candle, index) => [candle.timestamp, index]));
   const sortedMarkers = [...markers]
@@ -266,6 +370,13 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
               </span>
             </div>
           )}
+          <button
+            className="export-csv-button"
+            onClick={() => exportTradesToCSV(result)}
+            title="Export trades as CSV"
+          >
+            Export CSV
+          </button>
         </div>
 
         <div className="results-chart-stage">
