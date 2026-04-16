@@ -1751,7 +1751,8 @@ function AppInner() {
       const targetNode = current.nodes.find((node) => node.id === toNodeId);
       const targetDefinition = targetNode ? defaultNodeRegistry.get(targetNode.type) : null;
       const targetPort = targetDefinition?.inputs.find((port) => port.id === toPortId);
-      const allowMultiple = Boolean(targetPort?.allowMultiple);
+      const allowMultiple =
+        Boolean(targetPort?.allowMultiple) || (targetNode?.type === "output.signal" && toPortId === "signal");
 
       const nextEdges = current.edges.filter((edge) => {
         if (
