@@ -94,26 +94,6 @@ interface PortPosition {
   color: string;
 }
 
-interface DragPreviewState {
-  nodeId: string;
-  x: number;
-  y: number;
-}
-
-interface GroupPreviewState {
-  groupId: string;
-  x: number;
-  y: number;
-}
-
-interface GroupResizePreviewState {
-  groupId: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 interface CursorWorldPoint {
   x: number;
   y: number;
@@ -121,6 +101,28 @@ interface CursorWorldPoint {
 
 function areCamerasEqual(left: GraphCameraState, right: GraphCameraState) {
   return left.x === right.x && left.y === right.y && left.zoom === right.zoom;
+}
+
+function arePortPositionsEqual(
+  a: Record<string, PortPosition>,
+  b: Record<string, PortPosition>,
+) {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) {
+    return false;
+  }
+
+  return aKeys.every((key) => {
+    const left = a[key];
+    const right = b[key];
+    return (
+      right !== undefined &&
+      left.x === right.x &&
+      left.y === right.y &&
+      left.color === right.color
+    );
+  });
 }
 
 const NODE_WIDTH = 250;
@@ -262,17 +264,10 @@ export function Canvas({
   backtestResult,
   selectedPreviewEdgeIds,
 }: CanvasProps) {
-  const definitionMap = useMemo(
-    () => new Map(definitions.map((definition) => [definition.type, definition])),
-    [definitions],
-  );
+  const definitionMap = new Map(definitions.map((definition) => [definition.type, definition]));
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const graphLayerRef = useRef<HTMLDivElement | null>(null);
-  const dragStateRef = useRef<{
-    nodeId: string;
-    offsetX: number;
-    offsetY: number;
-  } | null>(null);
+  const dragStateRef = useRef<{ nodeId: string; offsetX: number; offsetY: number } | null>(null);
   const dragMoveStateRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
   const connectionDragRef = useRef<{
     pointerId: number;
@@ -301,14 +296,12 @@ export function Canvas({
   const hasUserSizedResultsRef = useRef(false);
   const [isResultsCollapsed, setIsResultsCollapsed] = useState(false);
   const [isResultsResizing, setIsResultsResizing] = useState(false);
+  const [portPositions, setPortPositions] = useState<Record<string, PortPosition>>({});
   const [dragPreviewPoint, setDragPreviewPoint] = useState<{ x: number; y: number } | null>(null);
   const [cursorWorldPoint, setCursorWorldPoint] = useState<CursorWorldPoint | null>(null);
   const [hoveredDeleteEdgeId, setHoveredDeleteEdgeId] = useState<string | null>(null);
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [liveBoxSelectedNodeIds, setLiveBoxSelectedNodeIds] = useState<string[]>([]);
-  const [dragPreview, setDragPreview] = useState<DragPreviewState | null>(null);
-  const [groupPreview, setGroupPreview] = useState<GroupPreviewState | null>(null);
-  const [groupResizePreview, setGroupResizePreview] = useState<GroupResizePreviewState | null>(null);
   const [editingNumberFields, setEditingNumberFields] = useState<Record<string, string>>({});
   const [editingNodeTitle, setEditingNodeTitle] = useState<{ nodeId: string; value: string } | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -610,87 +603,6 @@ export function Canvas({
 
   const getNumberFieldKey = (nodeId: string, fieldKey: string) => `${nodeId}:${fieldKey}`;
 
-  const displayedNodes = useMemo(() => {
-    if (!dragPreview) {
-      return nodes;
-    }
-
-    const anchorNode = nodes.find((node) => node.id === dragPreview.nodeId);
-    if (!anchorNode) {
-      return nodes;
-    }
-
-    const selectedSet = new Set(selectedNodeIds.includes(dragPreview.nodeId) ? selectedNodeIds : [dragPreview.nodeId]);
-    const deltaX = dragPreview.x - anchorNode.position.x;
-    const deltaY = dragPreview.y - anchorNode.position.y;
-
-    return nodes.map((node) =>
-      selectedSet.has(node.id)
-        ? {
-            ...node,
-            position: {
-              x: node.position.x + deltaX,
-              y: node.position.y + deltaY,
-            },
-          }
-        : node,
-    );
-  }, [dragPreview, nodes, selectedNodeIds]);
-
-  const displayedGroups = useMemo(
-    () =>
-      groups.map((group) => {
-        if (groupResizePreview?.groupId === group.id) {
-          return {
-            ...group,
-            position: { x: groupResizePreview.x, y: groupResizePreview.y },
-            size: {
-              width: groupResizePreview.width,
-              height: groupResizePreview.height,
-            },
-          };
-        }
-
-        if (groupPreview?.groupId === group.id) {
-          return {
-            ...group,
-            position: { x: groupPreview.x, y: groupPreview.y },
-          };
-        }
-
-        return group;
-      }),
-    [groupPreview, groupResizePreview, groups],
-  );
-
-  const portPositions = useMemo(() => {
-    const nextPositions: Record<string, PortPosition> = {};
-
-    for (const node of displayedNodes) {
-      const definition = definitionMap.get(node.type);
-      const inputs = getNodeInputs(node, definition);
-      const outputs = getNodeOutputs(node, definition);
-
-      inputs.forEach((port, index) => {
-        nextPositions[`${node.id}:${port.id}:input`] = {
-          x: WORLD_ORIGIN + node.position.x + SIDE_PORT_INSET + PORT_RADIUS,
-          y: WORLD_ORIGIN + node.position.y + getPortY(definition, index),
-          color: portColor(port.kind),
-        };
-      });
-
-      outputs.forEach((port, index) => {
-        nextPositions[`${node.id}:${port.id}:output`] = {
-          x: WORLD_ORIGIN + node.position.x + NODE_WIDTH - SIDE_PORT_INSET - PORT_RADIUS,
-          y: WORLD_ORIGIN + node.position.y + getPortY(definition, index),
-          color: portColor(port.kind),
-        };
-      });
-    }
-
-    return nextPositions;
-  }, [definitionMap, displayedNodes]);
-
   const commitNodeTitle = (nodeId: string, fallbackTitle: string) => {
     if (!editingNodeTitle || editingNodeTitle.nodeId !== nodeId) {
       return;
@@ -712,7 +624,7 @@ export function Canvas({
   };
 
   const getNodesInsideGroup = (group: GraphGroup) =>
-    displayedNodes
+    nodes
       .filter((node) => {
         const definition = definitionMap.get(node.type);
         const height = nodeHeight(node, definition);
@@ -812,7 +724,7 @@ export function Canvas({
       return measured;
     }
 
-    const node = displayedNodes.find((entry) => entry.id === nodeId);
+    const node = nodes.find((entry) => entry.id === nodeId);
     if (!node) {
       return null;
     }
@@ -957,9 +869,6 @@ export function Canvas({
     groupDragRef.current = null;
     groupResizeRef.current = null;
     setDragPreviewPoint(null);
-    setDragPreview(null);
-    setGroupPreview(null);
-    setGroupResizePreview(null);
   };
 
   const selectedNodeSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
@@ -974,7 +883,7 @@ export function Canvas({
     const top = Math.min(box.startY, box.endY);
     const bottom = Math.max(box.startY, box.endY);
 
-    return displayedNodes
+    return nodes
       .filter((node) => {
         const nodeLeft = node.position.x;
         const nodeRight = node.position.x + NODE_WIDTH;
@@ -1058,6 +967,34 @@ export function Canvas({
     onViewportCenterChange(getViewportCenterWorld());
     onCameraChange(camera);
   }, [camera.x, camera.y, camera.zoom, canvasSize.width, canvasSize.height, onViewportCenterChange, onCameraChange]);
+
+  useLayoutEffect(() => {
+    const layer = graphLayerRef.current;
+    if (!layer) {
+      return;
+    }
+
+    const layerRect = layer.getBoundingClientRect();
+    const nextPositions: Record<string, PortPosition> = {};
+    const portElements = layer.querySelectorAll<HTMLElement>("[data-port-key]");
+
+    portElements.forEach((element) => {
+      const key = element.dataset.portKey;
+      const color = element.dataset.portColor;
+      if (!key || !color) {
+        return;
+      }
+
+      const rect = element.getBoundingClientRect();
+      nextPositions[key] = {
+        x: (rect.left + rect.width / 2 - layerRect.left) / camera.zoom,
+        y: (rect.top + rect.height / 2 - layerRect.top) / camera.zoom,
+        color,
+      };
+    });
+
+    setPortPositions((current) => (arePortPositionsEqual(current, nextPositions) ? current : nextPositions));
+  }, [nodes, camera, canvasSize]);
 
   return (
     <main className="editor-shell">
@@ -1312,13 +1249,7 @@ export function Canvas({
               newHeight = isGridSnapEnabled ? Math.max(140, snapVal(raw)) : raw;
               newY = southEdge - newHeight;
             }
-            setGroupResizePreview({
-              groupId,
-              x: newX,
-              y: newY,
-              width: newWidth,
-              height: newHeight,
-            });
+            onResizeGroup(groupId, newX, newY, newWidth, newHeight);
             return;
           }
 
@@ -1331,11 +1262,12 @@ export function Canvas({
               }
             }
             const world = screenToWorld(event.clientX, event.clientY);
-            setGroupPreview({
-              groupId: groupDragRef.current.groupId,
-              x: world.x - groupDragRef.current.offsetX,
-              y: world.y - groupDragRef.current.offsetY,
-            });
+            onMoveGroup(
+              groupDragRef.current.groupId,
+              world.x - groupDragRef.current.offsetX,
+              world.y - groupDragRef.current.offsetY,
+              groupDragRef.current.nodeIds,
+            );
             return;
           }
 
@@ -1402,11 +1334,7 @@ export function Canvas({
             }
 
             const world = screenToWorld(event.clientX, event.clientY);
-            setDragPreview({
-              nodeId: dragStateRef.current.nodeId,
-              x: world.x - dragStateRef.current.offsetX,
-              y: world.y - dragStateRef.current.offsetY,
-            });
+            onMoveNode(dragStateRef.current.nodeId, world.x - dragStateRef.current.offsetX, world.y - dragStateRef.current.offsetY);
             return;
           }
 
@@ -1439,12 +1367,9 @@ export function Canvas({
         }}
         onPointerUp={(event) => {
           resizeResultsRef.current = null;
-          const activeGroupDrag = groupDragRef.current;
-          const activeGroupResize = groupResizeRef.current;
-          const nextGroupPreview = groupPreview;
-          const nextGroupResizePreview = groupResizePreview;
-          const nextDragPreview = dragPreview;
           const didMoveGroup = groupDragRef.current?.moved === true;
+          groupResizeRef.current = null;
+          groupDragRef.current = null;
           setIsResultsResizing(false);
           previewPressRef.current = null;
           if (panStateRef.current?.moved) {
@@ -1456,29 +1381,6 @@ export function Canvas({
           }
           if (didMoveGroup) {
             suppressNextGroupTitleClickRef.current = true;
-          }
-
-          if (activeGroupResize && nextGroupResizePreview) {
-            onResizeGroup(
-              nextGroupResizePreview.groupId,
-              nextGroupResizePreview.x,
-              nextGroupResizePreview.y,
-              nextGroupResizePreview.width,
-              nextGroupResizePreview.height,
-            );
-          }
-
-          if (activeGroupDrag && didMoveGroup && nextGroupPreview) {
-            onMoveGroup(
-              nextGroupPreview.groupId,
-              nextGroupPreview.x,
-              nextGroupPreview.y,
-              activeGroupDrag.nodeIds,
-            );
-          }
-
-          if (dragMoveStateRef.current?.moved && nextDragPreview) {
-            onMoveNode(nextDragPreview.nodeId, nextDragPreview.x, nextDragPreview.y);
           }
 
           if (selectionBox) {
@@ -1517,8 +1419,6 @@ export function Canvas({
           }
 
           safeReleasePointerCapture(viewportRef.current, event.pointerId);
-          groupResizeRef.current = null;
-          groupDragRef.current = null;
           stopAllInteractions();
         }}
         onPointerCancel={(event) => {
@@ -1588,7 +1488,7 @@ export function Canvas({
             transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
           }}
         >
-          {displayedGroups.map((group) => (
+          {groups.map((group) => (
             <div
               key={group.id}
               className="group-card"
@@ -1729,7 +1629,7 @@ export function Canvas({
             })()}
           </svg>
 
-          {displayedNodes.map((node) => {
+          {nodes.map((node) => {
             const definition = definitionMap.get(node.type);
             const height = nodeHeight(node, definition);
             const inputs = getNodeInputs(node, definition);
