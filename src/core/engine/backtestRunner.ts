@@ -36,6 +36,8 @@ interface ExecutionSnapshot {
   orderedNodes: GraphNode[];
 }
 
+type ExecutionErrorMap = Map<string, Error>;
+
 function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -336,6 +338,7 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
   const outputsByNodeId = new Map<string, Record<string, unknown>>();
   const orderedNodes = buildExecutionOrder(graph);
   const portalInputsByChannel = getPortalInputMap(graph);
+  const pendingErrors: ExecutionErrorMap = new Map();
 
   for (const node of orderedNodes) {
     options.onNodeStart?.(node.id);
@@ -346,22 +349,31 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
     try {
       const outputRecord = await executeNode(graph, node, outputsByNodeId, portalInputsByChannel);
       outputsByNodeId.set(node.id, outputRecord);
+      pendingErrors.delete(node.id);
       options.onNodeComplete?.(node.id);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
-      options.onNodeError?.(node.id, normalized);
-      // Do not re-throw: allow the rest of the graph to execute. Feedback-cycle nodes
-      // may fail on the first pass and recover during stabilization.
+      pendingErrors.set(node.id, normalized);
     }
   }
 
   const snapshot = { outputsByNodeId, orderedNodes };
-  await stabilizeExecutionFeedback(graph, snapshot);
+  await stabilizeExecutionFeedback(graph, snapshot, pendingErrors);
+
+  for (const [nodeId, error] of pendingErrors) {
+    if (!outputsByNodeId.has(nodeId)) {
+      options.onNodeError?.(nodeId, error);
+    }
+  }
 
   return snapshot;
 }
 
-async function stabilizeExecutionFeedback(graph: StrategyGraph, snapshot: ExecutionSnapshot) {
+async function stabilizeExecutionFeedback(
+  graph: StrategyGraph,
+  snapshot: ExecutionSnapshot,
+  pendingErrors: ExecutionErrorMap,
+) {
   const executionNode = graph.nodes.find((node) => node.type === "trading.execution");
   if (!executionNode) {
     return;
@@ -377,7 +389,12 @@ async function stabilizeExecutionFeedback(graph: StrategyGraph, snapshot: Execut
           node.id,
           await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
         );
-      } catch {
+        pendingErrors.delete(node.id);
+      } catch (error) {
+        const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
+        if (!snapshot.outputsByNodeId.has(node.id)) {
+          pendingErrors.set(node.id, normalized);
+        }
         // Ignore per-node errors during stabilization; the loop converges on valid
         // outputs once all feedback-cycle dependencies have been satisfied.
       }
