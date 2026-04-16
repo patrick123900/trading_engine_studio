@@ -1,7 +1,8 @@
 import type { NodeModule } from "../../core/types";
 
 function readNumber(value: unknown, fallback: number) {
-  return typeof value === "number" ? value : fallback;
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
 }
 
 const fixedValueNode: NodeModule = {

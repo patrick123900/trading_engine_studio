@@ -1,19 +1,43 @@
 import type { NodeModule } from "../../core/types";
 
-function toSeries(value: unknown) {
+function readNumber(value: unknown) {
   if (typeof value === "number") {
-    return { kind: "scalar" as const, values: [value] };
+    return Number.isFinite(value) ? value : null;
   }
 
-  if (Array.isArray(value) && value.every((entry) => typeof entry === "number")) {
-    return { kind: "series" as const, values: value };
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function toSeries(value: unknown) {
+  const numericValue = readNumber(value);
+  if (numericValue !== null) {
+    return { kind: "scalar" as const, values: [numericValue] };
+  }
+
+  if (Array.isArray(value)) {
+    const numericValues = value.map((entry) => readNumber(entry));
+    if (numericValues.every((entry) => entry !== null)) {
+      return { kind: "series" as const, values: numericValues };
+    }
   }
 
   if (value && typeof value === "object" && "values" in value) {
     const values = (value as { values?: unknown }).values;
-    if (Array.isArray(values) && values.every((entry) => typeof entry === "number")) {
-      return { kind: "series" as const, values };
+    if (Array.isArray(values)) {
+      const numericValues = values.map((entry) => readNumber(entry));
+      if (numericValues.every((entry) => entry !== null)) {
+        return { kind: "series" as const, values: numericValues };
+      }
     }
+  }
+
+  if (value && typeof value === "object" && "value" in value) {
+    return toSeries((value as { value?: unknown }).value);
   }
 
   return null;

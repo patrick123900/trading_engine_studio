@@ -148,9 +148,17 @@ function buildExecutionOrder(graph: StrategyGraph) {
     });
   }
 
+  // Priority for cycle-breaking: execution must run first so portals get fresh data.
+  function cyclePriority(node: GraphNode) {
+    if (node.type === "trading.execution") return 0;
+    if (node.type === "utility.portalIn") return 1;
+    if (node.type === "utility.portalOut") return 2;
+    return 3;
+  }
+
   const queue = graph.nodes
     .filter((node) => (incomingCount.get(node.id) ?? 0) === 0)
-    .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
+    .sort((a, b) => cyclePriority(a) - cyclePriority(b));
   const ordered: GraphNode[] = [];
   const queuedIds = new Set(queue.map((node) => node.id));
 
@@ -170,11 +178,76 @@ function buildExecutionOrder(graph: StrategyGraph) {
     }
   }
 
+  // Any remaining nodes are part of a feedback cycle. Order them by type priority
+  // so that execution always runs before portal and signal nodes regardless of
+  // where they are positioned on the canvas.
   if (ordered.length !== graph.nodes.length) {
     const remainder = graph.nodes
-      .filter((node) => !ordered.some((entry) => entry.id === node.id))
-      .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
-    ordered.push(...remainder);
+      .filter((node) => !ordered.some((entry) => entry.id === node.id));
+
+    // Within the cycle, do a best-effort topological sort respecting wired edges.
+    const remainderIds = new Set(remainder.map((n) => n.id));
+    const remainderIncoming = new Map<string, number>();
+    const remainderOutgoing = new Map<string, string[]>();
+    for (const n of remainder) {
+      remainderIncoming.set(n.id, 0);
+      remainderOutgoing.set(n.id, []);
+    }
+    for (const edge of graph.edges) {
+      if (remainderIds.has(edge.fromNodeId) && remainderIds.has(edge.toNodeId)) {
+        // Only count this edge if it doesn't create the cycle-back (signal→execution feedback).
+        // The cycle break point is signal/comparison → execution; execution should run first.
+        const toNode = nodeMap.get(edge.toNodeId);
+        if (toNode?.type === "trading.execution") {
+          continue; // skip feedback edge — execution runs unconditionally first
+        }
+        remainderIncoming.set(edge.toNodeId, (remainderIncoming.get(edge.toNodeId) ?? 0) + 1);
+        remainderOutgoing.get(edge.fromNodeId)?.push(edge.toNodeId);
+      }
+    }
+    // Also add portal channel virtual edges within the remainder.
+    for (const [channel, portalIns] of portalInputsByChannel) {
+      for (const portalIn of portalIns) {
+        if (!remainderIds.has(portalIn.node.id)) continue;
+        const matchingPortalOuts = remainder.filter(
+          (n) => n.type === "utility.portalOut" &&
+            getPortalOutChannels(n.config).some((c) => c.toLowerCase() === channel),
+        );
+        for (const portalOut of matchingPortalOuts) {
+          remainderIncoming.set(portalOut.id, (remainderIncoming.get(portalOut.id) ?? 0) + 1);
+          remainderOutgoing.get(portalIn.node.id)?.push(portalOut.id);
+        }
+      }
+    }
+
+    const cycleQueue = remainder
+      .filter((n) => (remainderIncoming.get(n.id) ?? 0) === 0)
+      .sort((a, b) => cyclePriority(a) - cyclePriority(b));
+    const cycleOrdered: GraphNode[] = [];
+    const cycleQueued = new Set(cycleQueue.map((n) => n.id));
+
+    while (cycleQueue.length > 0) {
+      const n = cycleQueue.shift()!;
+      cycleOrdered.push(n);
+      for (const targetId of remainderOutgoing.get(n.id) ?? []) {
+        remainderIncoming.set(targetId, (remainderIncoming.get(targetId) ?? 1) - 1);
+        if ((remainderIncoming.get(targetId) ?? 0) === 0) {
+          const targetNode = nodeMap.get(targetId);
+          if (targetNode && !cycleQueued.has(targetId)) {
+            cycleQueue.push(targetNode);
+            cycleQueued.add(targetId);
+          }
+        }
+      }
+    }
+
+    // Any still-unresolved nodes (deeper cycles) — sort by type priority as final fallback.
+    const stillUnresolved = remainder
+      .filter((n) => !cycleOrdered.some((o) => o.id === n.id))
+      .sort((a, b) => cyclePriority(a) - cyclePriority(b));
+    cycleOrdered.push(...stillUnresolved);
+
+    ordered.push(...cycleOrdered);
   }
 
   return ordered;
@@ -277,7 +350,8 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
       options.onNodeError?.(node.id, normalized);
-      throw normalized;
+      // Do not re-throw: allow the rest of the graph to execute. Feedback-cycle nodes
+      // may fail on the first pass and recover during stabilization.
     }
   }
 
@@ -298,10 +372,15 @@ async function stabilizeExecutionFeedback(graph: StrategyGraph, snapshot: Execut
 
   for (let iteration = 0; iteration < 6; iteration += 1) {
     for (const node of snapshot.orderedNodes) {
-      snapshot.outputsByNodeId.set(
-        node.id,
-        await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
-      );
+      try {
+        snapshot.outputsByNodeId.set(
+          node.id,
+          await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
+        );
+      } catch {
+        // Ignore per-node errors during stabilization; the loop converges on valid
+        // outputs once all feedback-cycle dependencies have been satisfied.
+      }
     }
 
     const currentSignals = resolveExecutionSignals(graph, snapshot, executionNode.id);
