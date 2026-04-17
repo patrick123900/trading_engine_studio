@@ -4,6 +4,10 @@ Trading Engine Studio is a browser-based visual editor for building and backtest
 
 You create a graph of data, indicator, arithmetic, logic, signal, execution, and utility nodes, then run the graph to simulate positions, inspect results, and explore output series directly inside the editor.
 
+Live deployment:
+
+https://trading.skysoft.dk
+
 ## Features
 
 - Node-based strategy editor with drag-and-drop connections
