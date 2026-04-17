@@ -35,6 +35,8 @@ interface CanvasProps {
   onOpenNodesLibrary: () => void;
   onOpenStrategyCollection: () => void;
   onOpenExecutionLog: () => void;
+  onOpenDocumentation: () => void;
+  onOpenAbout: () => void;
   onViewportCenterChange: (center: { x: number; y: number }) => void;
   onCameraChange: (camera: GraphCameraState) => void;
   initialCamera: GraphCameraState;
@@ -221,6 +223,8 @@ export function Canvas({
   onOpenNodesLibrary,
   onOpenStrategyCollection,
   onOpenExecutionLog,
+  onOpenDocumentation,
+  onOpenAbout,
   onViewportCenterChange,
   onCameraChange,
   initialCamera,
@@ -288,6 +292,7 @@ export function Canvas({
   const [isFileMenuOpen, setIsFileMenuOpen] = useState(false);
   const [isEditMenuOpen, setIsEditMenuOpen] = useState(false);
   const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const [isHelpMenuOpen, setIsHelpMenuOpen] = useState(false);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [camera, setCamera] = useState(initialCamera);
   const cameraRef = useRef(initialCamera);
@@ -346,6 +351,7 @@ export function Canvas({
     setIsFileMenuOpen(false);
     setIsEditMenuOpen(false);
     setIsViewMenuOpen(false);
+    setIsHelpMenuOpen(false);
     action();
   };
 
@@ -491,6 +497,40 @@ export function Canvas({
     cameraRef.current = nextCamera;
     setCamera(nextCamera);
   };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        event.defaultPrevented ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        (target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable))
+      ) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "g") {
+        event.preventDefault();
+        onToggleGridSnap();
+        return;
+      }
+
+      if (key === "c") {
+        event.preventDefault();
+        recenterCamera();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onToggleGridSnap, nodes, canvasSize.width, canvasSize.height]);
 
   const getPortY = (_definition: NodeDefinition | undefined, index: number) =>
     HEADER_HEIGHT + 23 + index * PORT_ROW_HEIGHT;
@@ -903,6 +943,7 @@ export function Canvas({
       setIsFileMenuOpen(false);
       setIsEditMenuOpen(false);
       setIsViewMenuOpen(false);
+      setIsHelpMenuOpen(false);
     };
 
     window.addEventListener("blur", handleWindowBlur);
@@ -919,6 +960,7 @@ export function Canvas({
       setIsFileMenuOpen(false);
       setIsEditMenuOpen(false);
       setIsViewMenuOpen(false);
+      setIsHelpMenuOpen(false);
     };
 
     window.addEventListener("click", closeMenus);
@@ -1007,12 +1049,14 @@ export function Canvas({
               onClick={() => {
                 setIsEditMenuOpen(false);
                 setIsViewMenuOpen(false);
+                setIsHelpMenuOpen(false);
                 setIsFileMenuOpen((current) => !current);
               }}
               onPointerEnter={() => {
-                if (isEditMenuOpen || isViewMenuOpen) {
+                if (isEditMenuOpen || isViewMenuOpen || isHelpMenuOpen) {
                   setIsEditMenuOpen(false);
                   setIsViewMenuOpen(false);
+                  setIsHelpMenuOpen(false);
                   setIsFileMenuOpen(true);
                 }
               }}
@@ -1050,12 +1094,14 @@ export function Canvas({
               onClick={() => {
                 setIsFileMenuOpen(false);
                 setIsViewMenuOpen(false);
+                setIsHelpMenuOpen(false);
                 setIsEditMenuOpen((current) => !current);
               }}
               onPointerEnter={() => {
-                if (isFileMenuOpen || isViewMenuOpen) {
+                if (isFileMenuOpen || isViewMenuOpen || isHelpMenuOpen) {
                   setIsFileMenuOpen(false);
                   setIsViewMenuOpen(false);
+                  setIsHelpMenuOpen(false);
                   setIsEditMenuOpen(true);
                 }
               }}
@@ -1090,12 +1136,14 @@ export function Canvas({
               onClick={() => {
                 setIsFileMenuOpen(false);
                 setIsEditMenuOpen(false);
+                setIsHelpMenuOpen(false);
                 setIsViewMenuOpen((current) => !current);
               }}
               onPointerEnter={() => {
-                if (isFileMenuOpen || isEditMenuOpen) {
+                if (isFileMenuOpen || isEditMenuOpen || isHelpMenuOpen) {
                   setIsFileMenuOpen(false);
                   setIsEditMenuOpen(false);
+                  setIsHelpMenuOpen(false);
                   setIsViewMenuOpen(true);
                 }
               }}
@@ -1112,6 +1160,65 @@ export function Canvas({
                 </button>
                 <button type="button" className="menu-dropdown-item" onClick={() => runFileAction(onOpenExecutionLog)} disabled={!canOpenExecutionLog}>
                   <MenuItemLabel label="Execution Log" />
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="menu-dropdown" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className={`menu-button menu-dropdown-trigger ${isHelpMenuOpen ? "is-open" : ""}`}
+              onClick={() => {
+                setIsFileMenuOpen(false);
+                setIsEditMenuOpen(false);
+                setIsViewMenuOpen(false);
+                setIsHelpMenuOpen((current) => !current);
+              }}
+              onPointerEnter={() => {
+                if (isFileMenuOpen || isEditMenuOpen || isViewMenuOpen) {
+                  setIsFileMenuOpen(false);
+                  setIsEditMenuOpen(false);
+                  setIsViewMenuOpen(false);
+                  setIsHelpMenuOpen(true);
+                }
+              }}
+            >
+              Help
+            </button>
+            {isHelpMenuOpen ? (
+              <div className="menu-dropdown-panel">
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() =>
+                    runFileAction(() => {
+                      window.open(
+                        "https://github.com/patrick123900/trading_engine_studio/issues/new",
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                    })
+                  }
+                >
+                  <MenuItemLabel label="Report a Bug" />
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() =>
+                    runFileAction(() => {
+                      window.location.href = "mailto:p.patrickkirk@gmail.com";
+                    })
+                  }
+                >
+                  <MenuItemLabel label="Contact" />
+                </button>
+                <div className="menu-dropdown-separator" />
+                <button type="button" className="menu-dropdown-item" onClick={() => runFileAction(onOpenDocumentation)}>
+                  <MenuItemLabel label="Documentation" />
+                </button>
+                <button type="button" className="menu-dropdown-item" onClick={() => runFileAction(onOpenAbout)}>
+                  <MenuItemLabel label="About" />
                 </button>
               </div>
             ) : null}
@@ -2329,8 +2436,8 @@ export function Canvas({
               event.preventDefault();
               recenterCamera();
             }}
-            title="Recenter Camera"
-            aria-label="Recenter Camera"
+            title="Recenter Camera (C)"
+            aria-label="Recenter Camera (C)"
           >
             <VideoCameraIcon className="control-icon" />
           </button>
@@ -2343,8 +2450,8 @@ export function Canvas({
               event.preventDefault();
               onToggleGridSnap();
             }}
-            title="Toggle Grid Snapping"
-            aria-label="Toggle Grid Snapping"
+            title="Toggle Grid Snapping (G)"
+            aria-label="Toggle Grid Snapping (G)"
             aria-pressed={isGridSnapEnabled}
           >
             <Squares2X2Icon className="control-icon" />

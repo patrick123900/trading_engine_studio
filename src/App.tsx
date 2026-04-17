@@ -50,6 +50,17 @@ interface DeleteDialogState {
   name: string;
 }
 
+interface DocumentationTopic {
+  id: string;
+  title: string;
+  searchText: string;
+  sections: Array<{
+    heading: string;
+    paragraphs?: string[];
+    bullets?: string[];
+  }>;
+}
+
 interface ErrorBoundaryProps {
   onError: (entry: RuntimeLogEntry) => void;
   children: ReactNode;
@@ -77,6 +88,486 @@ function makeRuntimeLogEntry(source: RuntimeLogEntry["source"], message: string,
     message,
     details,
   };
+}
+
+function formatPortKind(kind: NodeDefinition["inputs"][number]["kind"]) {
+  switch (kind) {
+    case "dataset":
+      return "dataset";
+    case "series":
+      return "numeric series";
+    case "number":
+      return "number or numeric series";
+    case "boolean":
+      return "boolean or boolean series";
+    case "signal":
+      return "trade signal";
+    case "product":
+      return "product";
+    case "any":
+    default:
+      return "any value";
+  }
+}
+
+function formatFieldType(type: NodeDefinition["fields"][number]["type"]) {
+  switch (type) {
+    case "number":
+      return "number";
+    case "select":
+      return "select";
+    case "symbol":
+      return "symbol";
+    case "checkbox":
+      return "checkbox";
+    case "text":
+    default:
+      return "text";
+  }
+}
+
+function getCustomFieldDoc(definition: NodeDefinition, fieldKey: string) {
+  const docs: Record<string, Record<string, string>> = {
+    "output.signal": {
+      side:
+        "Chooses whether this node represents a Long signal, a Short signal, or a Close signal. Long and Short only fire when the input changes from false to true. Close stays true for as long as its input stays true, so it continuously requests flattening while the close condition is active.",
+      reversePosition:
+        "If enabled, a Long signal can reverse an open short directly into a long, and a Short signal can reverse an open long directly into a short.",
+    },
+    "trading.execution": {
+      startingCapital: "Initial account value used when the simulation starts.",
+      positionAmount:
+        "Trade size. Enter a plain number like 1000 for a fixed amount, or add % such as 25% to use that percentage of the current account value at the time each new position is opened.",
+      positionPnlPercent:
+        "If enabled, the Position PnL output is shown as percentage of the invested amount of the currently open position. If disabled, it is shown as account-currency amount.",
+      longFillAnchor:
+        "Price anchor used when a long-side signal causes an entry, exit, or reversal. Open is usually neutral, High is pessimistic for long fills, Low is optimistic, and Close assumes end-of-bar execution.",
+      shortFillAnchor:
+        "Price anchor used when a short-side signal causes an entry, exit, or reversal. Open is usually neutral, Low is pessimistic for short entries, High is pessimistic for short exits, and Close assumes end-of-bar execution.",
+      allowShorts:
+        "Controls whether the engine is allowed to open new short positions. Short-side signals can still be used to close existing longs.",
+      slippagePct:
+        "Worsens fill prices by this percentage in the unfavorable direction on both entries and exits.",
+      commissionPct:
+        "Commission charged as a percentage of trade notional on both entry and exit.",
+    },
+    "data.yfinance": {
+      symbol: "Ticker symbol to generate data for, such as AAPL.",
+      interval: "Bar length for the returned candles: 1 day, 1 hour, or 15 minutes.",
+      lookback: "Number of bars to return.",
+    },
+    "data.alternativeCryptoMarket": {
+      symbol: "Binance market symbol such as BTCUSDT.",
+      interval: "Bar length for the returned candles, from 1 minute up to 1 day.",
+      lookback: "Number of candles to request.",
+    },
+    "data.ecbFx": {
+      base: "Base currency of the pair, for example EUR.",
+      quote: "Quote currency of the pair, for example USD.",
+      lookback: "Number of daily reference bars to return.",
+    },
+    "data.alternativeFearGreed": {
+      lookback: "Number of historical Fear & Greed observations to return.",
+    },
+    "data.eiaBulk": {
+      series: "Which bundled EIA energy series to load.",
+      lookback: "Number of observations to return from the end of the selected series.",
+    },
+    "data.worldBankCommodity": {
+      commodity: "Which World Bank commodity price series to load.",
+      lookback: "Number of monthly observations to return from the end of the selected series.",
+    },
+    "data.ohlcSource": {
+      source: "Which price field to extract from the incoming dataset: Open, High, Low, or Close.",
+    },
+    "data.yfinanceUpgradesDowngrades": {
+      strength: "Scales the size of upgrade and downgrade events in the generated historical event series.",
+    },
+    "indicator.rsi": {
+      period: "RSI lookback length.",
+    },
+    "indicator.ma": {
+      method: "Moving average calculation method: SMA, EMA, or WMA.",
+      length: "Number of bars used in the moving average.",
+    },
+    "logic.comparison": {
+      operator: "Comparison operator applied between Left and Right.",
+    },
+    "logic.fixedValue": {
+      value: "Constant numeric value emitted by the node.",
+    },
+    "arithmetic.offset": {
+      bars: "Positive values shift the source right in time, so the current bar sees older values. Negative values shift left and introduce lookahead.",
+    },
+  };
+
+  return docs[definition.type]?.[fieldKey];
+}
+
+function getCustomOutputDoc(definition: NodeDefinition, outputId: string) {
+  const docs: Record<string, Record<string, string>> = {
+    "trading.execution": {
+      longPosition:
+        "Boolean series that is true on bars where the strategy is currently holding a long position after simulated fills are applied.",
+      shortPosition:
+        "Boolean series that is true on bars where the strategy is currently holding a short position after simulated fills are applied.",
+      positionPnl:
+        "Series of unrealized PnL for the currently open position. Flat bars output 0. Depending on the checkbox setting, this is either amount or percentage of invested amount.",
+    },
+    "output.signal": {
+      signal:
+        "Structured trade-signal stream consumed by Trade Execution. It carries the boolean trigger values, the selected side, and the reverse-position flag.",
+    },
+    "data.yfinance": {
+      dataset:
+        "OHLC dataset with timestamps, interval, symbol, and bars count. The open, high, low, and close arrays all match the selected interval and lookback.",
+      product:
+        "Product description for the same symbol, including the marketData payload used by Trade Execution for fills and charting.",
+    },
+    "data.alternativeCryptoMarket": {
+      dataset:
+        "Historical crypto OHLC dataset from Binance with timestamps plus open, high, low, and close arrays at the selected interval.",
+      product:
+        "Crypto product description with embedded marketData, suitable for Trade Execution input.",
+    },
+    "data.ecbFx": {
+      dataset:
+        "Daily ECB FX reference-rate dataset. Open, high, low, and close are all the same daily reference value, so it behaves like synthetic flat OHLC bars rather than true intraday candles.",
+      product:
+        "Forex product description with the same daily reference-rate marketData embedded for execution and charting.",
+    },
+    "data.alternativeFearGreed": {
+      series:
+        "Numeric historical series in the 0-100 Fear & Greed scale. Each point is a dated sentiment reading, not OHLC data.",
+    },
+    "data.eiaBulk": {
+      series:
+        "Historical numeric energy price series from the bundled EIA dataset. This is a single-value series, not OHLC candles.",
+    },
+    "data.worldBankCommodity": {
+      series:
+        "Historical monthly numeric commodity price series from the World Bank Pink Sheet. This is monthly single-value data, not OHLC candles.",
+    },
+    "data.ohlcSource": {
+      series:
+        "Numeric series extracted from the chosen OHLC field of the incoming dataset. Timestamps are preserved from the source dataset.",
+    },
+    "data.yfinanceUpgradesDowngrades": {
+      event:
+        "Sparse numeric event series where positive values represent upgrade-like events and negative values represent downgrade-like events.",
+      score:
+        "Running analyst-tone score derived from the event stream. Higher means more positive analyst history in this synthetic aligned series.",
+    },
+    "data.yfinanceEarningsHistory": {
+      surprisePct:
+        "Sparse numeric earnings-surprise series. Most bars are 0, and earnings bars contain the simulated surprise percentage.",
+      event:
+        "Sparse event-direction series. Earnings bars are 1 for positive surprise and -1 for negative surprise; non-event bars are 0.",
+    },
+    "indicator.rsi": {
+      series: "RSI series scaled from 0 to 100.",
+    },
+    "indicator.ma": {
+      series: "Moving-average series using the selected calculation method and length.",
+    },
+    "arithmetic.normalizePair": {
+      leftNormalized: "Left input rebased so its first usable value starts at 100.",
+      rightNormalized: "Right input rebased so its first usable value starts at 100.",
+    },
+    "arithmetic.offset": {
+      series: "Shifted copy of the source series with the same timestamps.",
+    },
+  };
+
+  return docs[definition.type]?.[outputId];
+}
+
+function getCustomNodeNotes(definition: NodeDefinition) {
+  const notes: Record<string, string[]> = {
+    "data.yfinance": [
+      "Granularity is customizable between daily, hourly, and 15-minute bars.",
+      "This node outputs true OHLC arrays plus timestamps and symbol information.",
+    ],
+    "data.alternativeCryptoMarket": [
+      "Granularity is customizable from 1 minute through 1 day depending on the selected Binance interval.",
+      "This node outputs true OHLC arrays plus timestamps and symbol information.",
+    ],
+    "data.ecbFx": [
+      "Granularity is daily only.",
+      "The dataset shape is OHLC-compatible, but all four fields are the same daily reference rate because ECB provides reference values rather than true candles.",
+    ],
+    "data.alternativeFearGreed": [
+      "This is a historical sentiment index for the crypto market, centered on the Alternative.me Fear & Greed dataset.",
+      "It outputs a single numeric series in the 0-100 range, not a product and not OHLC candles.",
+    ],
+    "data.eiaBulk": [
+      "This node returns a single historical numeric series from bundled EIA data rather than OHLC candles.",
+      "Series frequency depends on the selected preset, such as daily, weekly, or monthly.",
+    ],
+    "data.worldBankCommodity": [
+      "Granularity is monthly.",
+      "This node returns a single historical numeric series rather than OHLC candles.",
+    ],
+    "output.signal": [
+      "Long and Short signals are edge-triggered: they only fire when input changes from false to true.",
+      "Close is level-triggered: it stays active for as long as the input stays true, so it can keep requesting a close condition until the position is flat.",
+    ],
+    "trading.execution": [
+      "This node is where the backtest engine gets its execution assumptions: capital, sizing, fill anchors, slippage, commissions, and whether shorts may be opened.",
+      "It consumes Product plus one or more Signal inputs and produces state series that you can feed back into logic and gates.",
+    ],
+  };
+
+  return notes[definition.type] ?? [];
+}
+
+function createDocumentationTopics(definitions: NodeDefinition[]): DocumentationTopic[] {
+  const groupedDefinitions = definitions.reduce<Record<string, NodeDefinition[]>>((acc, definition) => {
+    acc[definition.category] ??= [];
+    acc[definition.category].push(definition);
+    return acc;
+  }, {});
+
+  const baseTopics: DocumentationTopic[] = [
+    {
+      id: "overview",
+      title: "Overview",
+      searchText: "overview getting started visual scripting backtesting strategies nodes graph",
+      sections: [
+        {
+          heading: "What This Tool Is",
+          paragraphs: [
+            "This app is a visual strategy builder for backtesting trading ideas. You build a graph of nodes, connect data to indicators and logic, then feed the result into Trade Execution to simulate entries, exits, positions, and performance.",
+            "Everything currently runs client-side in the browser. Saved strategies live in browser storage unless you export them.",
+          ],
+        },
+        {
+          heading: "Typical Workflow",
+          bullets: [
+            "Add a data source such as YFinance, crypto data, ECB FX, EIA energy, or World Bank commodities.",
+            "Convert or derive series with nodes like OHLC Source, RSI, MA, Offset, Arithmetic, Crosses Above, Crosses Below, AND, OR, and NOT.",
+            "Turn logic into trade intent with Signal nodes.",
+            "Feed Product and Signals into Trade Execution.",
+            "Run the strategy and inspect results, logs, and series previews.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "menus",
+      title: "Menus & Windows",
+      searchText: "file edit view help menus nodes library strategy collection execution log documentation import export save open",
+      sections: [
+        {
+          heading: "Top Menu Bar",
+          bullets: [
+            "File: New, Open, Save, Save As, Import, Export.",
+            "Edit: Undo, Redo, Copy, Cut, Paste.",
+            "View: Nodes Library, Strategy Collection, Execution Log.",
+            "Help: Documentation.",
+          ],
+        },
+        {
+          heading: "Windows",
+          bullets: [
+            "Nodes Library lets you search and add nodes or groups.",
+            "Strategy Collection shows saved strategies with preview cards, rename, search, and delete.",
+            "Execution Log opens the full log from the latest run.",
+            "Documentation is the in-app manual you are reading now.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "controls",
+      title: "Canvas & Controls",
+      searchText: "canvas controls pan zoom drag connect box select ctrl click right click auto align recenter grid snap",
+      sections: [
+        {
+          heading: "Mouse & Graph Editing",
+          bullets: [
+            "Left-drag on empty canvas pans the camera.",
+            "Ctrl/Cmd + left-drag makes a selection box.",
+            "Ctrl/Cmd + click toggles node selection.",
+            "Drag node headers to move nodes. Drag a selected node to move the selected group of nodes.",
+            "Start a connection by dragging from an output dot to an input.",
+            "Right-click the canvas to open Add Node / Create Group.",
+          ],
+        },
+        {
+          heading: "Floating Controls",
+          bullets: [
+            "Auto Align reorganizes the graph layout.",
+            "Recenter Camera frames all nodes and can be triggered with C.",
+            "Grid Snap toggles snapping for movement and placement and can be toggled with G.",
+            "Run executes the current strategy.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "groups",
+      title: "Groups",
+      searchText: "groups create group move group rename group resize group auto align within group",
+      sections: [
+        {
+          heading: "Working With Groups",
+          bullets: [
+            "Create a group from the right-click menu or Nodes Library.",
+            "Groups are visual regions with a title and resize handle.",
+            "Drag a group header to move the group and all nodes fully contained inside it.",
+            "Click the group title to rename it inline.",
+            "Auto Align respects group boundaries first, then aligns ungrouped nodes normally.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "execution",
+      title: "Signals & Trade Execution",
+      searchText: "signal trade execution long short reverse position amount starting capital commission slippage fill anchor open high low close pnl",
+      sections: [
+        {
+          heading: "Signal Nodes",
+          bullets: [
+            "Signal turns boolean logic into trade intent.",
+            "Long and Short signals emit on rising edge, not continuously on every true bar.",
+            "Close signals stay true for as long as the input stays true. In practice, that means a Close signal behaves like an active flatten request rather than a one-bar pulse.",
+            "Use side to decide whether the signal is Long or Short.",
+            "Reverse Position lets a signal reverse an opposite open position instead of only closing it.",
+          ],
+        },
+        {
+          heading: "Trade Execution",
+          bullets: [
+            "Trade Execution takes a Product input and one or more Signal inputs.",
+            "Starting Capital sets initial account value.",
+            "Position Amount accepts either a fixed amount like 1000 or a percentage like 25%. A percentage is always based on the account value as it exists at that point in the simulation, so gains and losses from earlier closed trades change the size of later percentage-based positions.",
+            "Long Fill and Short Fill define which bar anchor is used when fills are simulated: Open, High, Low, or Close.",
+            "Allow Shorts blocks opening new short positions, but short signals can still be used to close longs when appropriate.",
+            "Position PnL can be output as amount or percentage of invested capital for that open position.",
+            "Long Position is true when the simulation is currently long, Short Position is true when it is currently short, and Position PnL is the unrealized PnL of the current open position.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "results",
+      title: "Running & Results",
+      searchText: "run results chart equity candles metrics sharpe buy hold execution log preview outputs",
+      sections: [
+        {
+          heading: "Running a Strategy",
+          bullets: [
+            "Press the Run button to execute the graph in dependency order.",
+            "The currently executing node highlights in green.",
+            "A node that throws an error highlights in red and the runtime log captures the error.",
+          ],
+        },
+        {
+          heading: "Results Pane",
+          bullets: [
+            "The bottom pane shows key metrics and a chart.",
+            "The pane can be resized or collapsed.",
+            "The execution log is available from View -> Execution Log.",
+            "The default chart shows normalized product price and strategy equity.",
+          ],
+        },
+        {
+          heading: "Inspecting Output Series",
+          bullets: [
+            "After a run, click an output label to preview that output’s executed series.",
+            "Ctrl/Cmd + click output labels to compare multiple series at once.",
+            "You can preview outputs even if they are not connected anywhere.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "saving",
+      title: "Saving, Import & Export",
+      searchText: "save save as open import export local storage browser github docker",
+      sections: [
+        {
+          heading: "Persistence",
+          bullets: [
+            "Save stores the current strategy in browser storage on the current machine/browser profile.",
+            "Save As creates a named copy.",
+            "Open and Strategy Collection load saved strategies from browser storage.",
+          ],
+        },
+        {
+          heading: "Files",
+          bullets: [
+            "Export writes the strategy graph and camera state to JSON.",
+            "Import loads a strategy JSON back into the editor.",
+            "If you use multiple computers or browsers, use Export/Import to move strategies between them.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "node-catalog",
+      title: "Node Catalog",
+      searchText: "node catalog categories all nodes",
+      sections: [
+        {
+          heading: "Available Categories",
+          bullets: Object.keys(groupedDefinitions)
+            .sort((a, b) => a.localeCompare(b))
+            .map((category) => `${category}: ${(groupedDefinitions[category] ?? []).length} node(s)`),
+        },
+      ],
+    },
+  ];
+
+  const categoryTopics = Object.keys(groupedDefinitions)
+    .sort((a, b) => a.localeCompare(b))
+    .map<DocumentationTopic>((category) => {
+      const categoryDefinitions = [...(groupedDefinitions[category] ?? [])].sort((a, b) =>
+        a.title.localeCompare(b.title),
+      );
+      return {
+        id: `category-${category.toLowerCase().replace(/\s+/g, "-")}`,
+        title: `${category} Nodes`,
+        searchText: `${category} ${categoryDefinitions.map((definition) => `${definition.title} ${definition.description} ${definition.type} ${definition.fields.map((field) => field.label).join(" ")} ${definition.inputs.map((port) => port.label).join(" ")} ${definition.outputs.map((port) => port.label).join(" ")}`).join(" ")}`,
+        sections: categoryDefinitions.map((definition) => ({
+          heading: definition.title,
+          paragraphs: [definition.description],
+          bullets: [
+            `Type: ${definition.type}`,
+            ...(definition.inputs.length > 0
+              ? definition.inputs.map(
+                  (port) =>
+                    `Input - ${port.label}: ${formatPortKind(port.kind)}${port.allowMultiple ? "; multiple connections allowed" : ""}.`,
+                )
+              : ["Inputs: None"]),
+            ...(definition.outputs.length > 0
+              ? definition.outputs.map((port) => {
+                  const customOutputDoc = getCustomOutputDoc(definition, port.id);
+                  return `Output - ${port.label}: ${customOutputDoc ?? `${formatPortKind(port.kind)} output.`}`;
+                })
+              : ["Outputs: None"]),
+            ...(definition.fields.length > 0
+              ? definition.fields.map((field) => {
+                  const customFieldDoc = getCustomFieldDoc(definition, field.key);
+                  const optionsText =
+                    field.type === "select" && field.options?.length
+                      ? ` Options: ${field.options.map((option) => option.label).join(", ")}.`
+                      : "";
+                  const fallback = `Parameter - ${field.label}: ${formatFieldType(field.type)} field.${optionsText}`;
+                  return customFieldDoc
+                    ? `Parameter - ${field.label}: ${customFieldDoc}${optionsText}`
+                    : fallback;
+                })
+              : ["Parameters: None"]),
+            ...getCustomNodeNotes(definition).map((note) => `Note: ${note}`),
+          ],
+        })),
+      };
+    });
+
+  return [...baseTopics, ...categoryTopics];
 }
 
 function makeEdgeId() {
@@ -119,6 +610,19 @@ function cloneGraph(graph: StrategyGraph): StrategyGraph {
 }
 
 const DEFAULT_CAMERA: GraphCameraState = { x: 80 - 25000, y: 70 - 25000, zoom: 1 };
+const GRID_SNAP_STORAGE_KEY = "trading-engine:grid-snap-enabled";
+
+function loadGridSnapPreference() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(GRID_SNAP_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
 function createEmptyGraph(): StrategyGraph {
   return { nodes: [], edges: [], groups: [] };
@@ -1193,6 +1697,211 @@ function StrategyCollectionWindow({
   );
 }
 
+function DocumentationWindow({
+  topics,
+  onClose,
+}: {
+  topics: DocumentationTopic[];
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [activeTopicId, setActiveTopicId] = useState(topics[0]?.id ?? "");
+
+  const filteredTopics = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) {
+      return topics;
+    }
+
+    return topics.filter((topic) =>
+      `${topic.title} ${topic.searchText} ${topic.sections
+        .map((section) => `${section.heading} ${(section.paragraphs ?? []).join(" ")} ${(section.bullets ?? []).join(" ")}`)
+        .join(" ")}`
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [search, topics]);
+
+  useEffect(() => {
+    if (!filteredTopics.some((topic) => topic.id === activeTopicId)) {
+      setActiveTopicId(filteredTopics[0]?.id ?? "");
+    }
+  }, [activeTopicId, filteredTopics]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const activeTopic = filteredTopics.find((topic) => topic.id === activeTopicId) ?? filteredTopics[0] ?? null;
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div className="documentation-window" onClick={(event) => event.stopPropagation()}>
+        <div className="nodes-library-header">
+          <div>
+            <h2>Documentation</h2>
+            <p>Learn the workflow, controls, backtest model, and available nodes.</p>
+          </div>
+          <button type="button" className="dialog-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="documentation-search">
+          <input
+            type="text"
+            placeholder="Search documentation"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+
+        <div className="documentation-body">
+          <aside className="documentation-topics">
+            {filteredTopics.length === 0 ? (
+              <p className="nodes-library-empty">No documentation topics matched your search.</p>
+            ) : (
+              filteredTopics.map((topic) => (
+                <button
+                  key={topic.id}
+                  type="button"
+                  className={`documentation-topic ${topic.id === activeTopic?.id ? "is-active" : ""}`}
+                  onClick={() => setActiveTopicId(topic.id)}
+                >
+                  {topic.title}
+                </button>
+              ))
+            )}
+          </aside>
+
+          <section className="documentation-content">
+            {activeTopic ? (
+              <article className="documentation-article">
+                <header className="documentation-article-header">
+                  <h3>{activeTopic.title}</h3>
+                </header>
+                {activeTopic.sections.map((section) => (
+                  <section key={`${activeTopic.id}-${section.heading}`} className="documentation-section">
+                    <h4>{section.heading}</h4>
+                    {(section.paragraphs ?? []).map((paragraph) => (
+                      <p key={paragraph}>{paragraph}</p>
+                    ))}
+                    {section.bullets?.length ? (
+                      <ul>
+                        {section.bullets.map((bullet) => (
+                          <li key={bullet}>{bullet}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </section>
+                ))}
+              </article>
+            ) : (
+              <p className="nodes-library-empty">No documentation topics matched your search.</p>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AboutWindow({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div className="about-window" onClick={(event) => event.stopPropagation()}>
+        <div className="open-dialog-header">
+          <div>
+            <h2>About Trading Engine Studio</h2>
+            <p className="window-subtitle">Visual strategy design and backtesting for idea exploration.</p>
+          </div>
+          <button type="button" className="dialog-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="about-window-body">
+          <section className="about-hero">
+            <div className="about-badge">Trading Engine Studio</div>
+            <h3>Build, test, and inspect trading strategies in a node-based workspace.</h3>
+            <p>
+              Trading Engine Studio is a browser-based visual environment for creating strategy graphs from market
+              data, indicators, arithmetic, logic, signals, and execution rules. It is designed to make strategy
+              iteration feel fast, visual, and inspectable.
+            </p>
+          </section>
+
+          <section className="about-grid">
+            <div className="about-card">
+              <h4>Author</h4>
+              <p>Patrick Kirk</p>
+            </div>
+            <div className="about-card">
+              <h4>Project Link</h4>
+              <p>
+                <a
+                  href="https://github.com/patrick123900/trading_engine_studio"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  github.com/patrick123900/trading_engine_studio
+                </a>
+              </p>
+            </div>
+            <div className="about-card">
+              <h4>Use Case</h4>
+              <p>Visual backtesting, signal design, trade execution modeling, and strategy debugging.</p>
+            </div>
+            <div className="about-card">
+              <h4>Runtime Model</h4>
+              <p>Client-side execution in the browser with local persistence unless strategies are exported.</p>
+            </div>
+          </section>
+
+          <section className="about-section">
+            <h4>License & Usage</h4>
+            <p>
+              Free to use for evaluation and personal use. Redistribution, resale, republishing, or copying the
+              application or its codebase into another product is not permitted without explicit permission from the
+              author.
+            </p>
+          </section>
+
+          <section className="about-section">
+            <h4>What The Tool Covers</h4>
+            <ul>
+              <li>Node-based strategy construction with grouped graph editing.</li>
+              <li>Historical data nodes for equities, crypto, FX, commodities, and sentiment series.</li>
+              <li>Backtest execution with configurable fills, sizing, slippage, commissions, and position state outputs.</li>
+              <li>Result inspection through charts, metrics, logs, and output-series previews.</li>
+            </ul>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NameDialog({
   title,
   label,
@@ -1298,6 +2007,7 @@ function AppInner() {
     () => new Map(definitions.map((definition) => [definition.type, definition])),
     [definitions],
   );
+  const documentationTopics = useMemo(() => createDocumentationTopics(definitions), [definitions]);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [graph, setGraph] = useState<StrategyGraph>(emptyGraph);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -1312,6 +2022,8 @@ function AppInner() {
   const [isNodesLibraryOpen, setIsNodesLibraryOpen] = useState(false);
   const [isStrategyCollectionOpen, setIsStrategyCollectionOpen] = useState(false);
   const [isExecutionLogOpen, setIsExecutionLogOpen] = useState(false);
+  const [isDocumentationOpen, setIsDocumentationOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [nameDialogState, setNameDialogState] = useState<NameDialogState | null>(null);
   const [deleteDialogState, setDeleteDialogState] = useState<DeleteDialogState | null>(null);
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
@@ -1324,13 +2036,21 @@ function AppInner() {
   const viewportCenterRef = useRef({ x: 0, y: 0 });
   const [loadedCameraState, setLoadedCameraState] = useState<GraphCameraState>(DEFAULT_CAMERA);
   const cameraStateRef = useRef<GraphCameraState>(DEFAULT_CAMERA);
-  const [isGridSnapEnabled, setIsGridSnapEnabled] = useState(false);
+  const [isGridSnapEnabled, setIsGridSnapEnabled] = useState<boolean>(() => loadGridSnapPreference());
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
   const [selectedPreviewEdgeIds, setSelectedPreviewEdgeIds] = useState<string[]>([]);
   const [isRunningBacktest, setIsRunningBacktest] = useState(false);
   const [executingNodeId, setExecutingNodeId] = useState<string | null>(null);
   const [errorNodeId, setErrorNodeId] = useState<string | null>(null);
   const isDirty = useMemo(() => JSON.stringify(graph) !== lastSavedSnapshot, [graph, lastSavedSnapshot]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(GRID_SNAP_STORAGE_KEY, String(isGridSnapEnabled));
+    } catch {
+      // Ignore storage failures and keep the in-memory preference.
+    }
+  }, [isGridSnapEnabled]);
 
   const commitGraph = (
     updater: StrategyGraph | ((current: StrategyGraph) => StrategyGraph),
@@ -2300,6 +3020,8 @@ function AppInner() {
           setIsStrategyCollectionOpen(true);
         }}
         onOpenExecutionLog={() => setIsExecutionLogOpen(true)}
+        onOpenDocumentation={() => setIsDocumentationOpen(true)}
+        onOpenAbout={() => setIsAboutOpen(true)}
         onViewportCenterChange={(center) => {
           viewportCenterRef.current = center;
         }}
@@ -2410,6 +3132,12 @@ function AppInner() {
           </div>
         </div>
       ) : null}
+
+      {isDocumentationOpen ? (
+        <DocumentationWindow topics={documentationTopics} onClose={() => setIsDocumentationOpen(false)} />
+      ) : null}
+
+      {isAboutOpen ? <AboutWindow onClose={() => setIsAboutOpen(false)} /> : null}
 
       {nameDialogState ? (
         <NameDialog
