@@ -1,7 +1,48 @@
 import type { NodeModule } from "../../core/types";
 
-function readNumber(value: unknown, fallback: number) {
-  return typeof value === "number" ? value : fallback;
+const MIN_BARS = 20;
+const MAX_BARS = 5000;
+
+function resolveLookbackBars(value: unknown) {
+  if (value === undefined || value === null) {
+    return MAX_BARS;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return MAX_BARS;
+    }
+
+    if (trimmed.toLowerCase() === "null") {
+      return MAX_BARS;
+    }
+
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) {
+      return NaN;
+    }
+
+    if (numeric === 0) {
+      return MAX_BARS;
+    }
+
+    return Math.floor(numeric);
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return NaN;
+    }
+
+    if (value === 0) {
+      return MAX_BARS;
+    }
+
+    return Math.floor(value);
+  }
+
+  return NaN;
 }
 
 function normalizeSymbol(value: unknown) {
@@ -56,6 +97,26 @@ function intervalToDays(interval: string) {
   }
 }
 
+function isWeekendUtc(date: Date) {
+  const day = date.getUTCDay();
+  return day === 0 || day === 6;
+}
+
+function buildBusinessDayTimeline(end: Date, bars: number) {
+  const timeline: Date[] = [];
+  const cursor = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate(), 0, 0, 0, 0));
+
+  while (timeline.length < bars) {
+    if (!isWeekendUtc(cursor)) {
+      timeline.push(new Date(cursor.getTime()));
+    }
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+
+  timeline.reverse();
+  return timeline;
+}
+
 const yfinanceNode: NodeModule = {
   definition: {
     type: "data.yfinance",
@@ -80,7 +141,7 @@ const yfinanceNode: NodeModule = {
           { label: "15 Minutes", value: "15m" },
         ],
       },
-      { key: "lookback", label: "Lookback Bars", type: "number", defaultValue: 250 },
+      { key: "lookback", label: "Lookback Bars", type: "number", defaultValue: "" },
     ],
   },
   executor: {
@@ -88,7 +149,7 @@ const yfinanceNode: NodeModule = {
     run: async ({ node }) => {
       const symbol = normalizeSymbol(node.config.symbol ?? "AAPL");
       const interval = String(node.config.interval ?? "1d");
-      const bars = Math.max(20, Math.floor(readNumber(node.config.lookback, 250)));
+      const bars = resolveLookbackBars(node.config.lookback);
 
       if (!symbol) {
         throw new Error("YFinance Fetcher requires a symbol.");
@@ -106,11 +167,11 @@ const yfinanceNode: NodeModule = {
         throw new Error(`YFinance Fetcher does not support interval "${interval}".`);
       }
 
-      if (!Number.isFinite(bars) || bars < 20) {
+      if (!Number.isFinite(bars) || bars < MIN_BARS) {
         throw new Error("YFinance Fetcher requires at least 20 lookback bars.");
       }
 
-      if (bars > 5000) {
+      if (bars > MAX_BARS) {
         throw new Error("YFinance Fetcher failed because the requested lookback is too large.");
       }
 
@@ -125,8 +186,9 @@ const yfinanceNode: NodeModule = {
         const lows: number[] = [];
         const closes: number[] = [];
         const timestamps: string[] = [];
-        const start = new Date("2024-01-01T00:00:00Z");
+        const end = new Date();
         const stepDays = intervalToDays(interval);
+        const dailyTimeline = interval === "1d" ? buildBusinessDayTimeline(end, bars) : [];
         let previousClose = 90 + (seed % 70);
         let regimeDrift = ((seed % 5) - 2) * 0.0007;
         let volatility = 0.012 + (seed % 7) * 0.0015;
@@ -152,7 +214,13 @@ const yfinanceNode: NodeModule = {
           highs.push(Number(high.toFixed(2)));
           lows.push(Number(low.toFixed(2)));
           closes.push(Number(close.toFixed(2)));
-          timestamps.push(new Date(start.getTime() + index * stepDays * 24 * 60 * 60 * 1000).toISOString());
+
+          if (interval === "1d") {
+            timestamps.push(dailyTimeline[index].toISOString());
+          } else {
+            const barsFromEnd = bars - 1 - index;
+            timestamps.push(new Date(end.getTime() - barsFromEnd * stepDays * 24 * 60 * 60 * 1000).toISOString());
+          }
         }
 
         const marketData = {

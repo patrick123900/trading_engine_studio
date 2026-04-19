@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import type { BacktestResult, CandlePoint, EquityPoint, SeriesPreview, TradeMarker } from "../core/types";
 
 interface ResultsPanelProps {
@@ -77,6 +77,87 @@ function formatSeriesTick(value: number) {
 function previewColor(index: number) {
   const palette = ["#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171"];
   return palette[index % palette.length];
+}
+
+interface TimeTick {
+  key: string;
+  label: string;
+  ratio: number;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function formatTimeTickLabel(date: Date, spanMs: number, averageStepMs: number) {
+  if (averageStepMs < MS_PER_DAY && spanMs <= 14 * MS_PER_DAY) {
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  if (spanMs <= 180 * MS_PER_DAY) {
+    return date.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  if (spanMs <= 3 * 365 * MS_PER_DAY) {
+    return date.toLocaleDateString(undefined, {
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  return date.toLocaleDateString(undefined, {
+    year: "numeric",
+  });
+}
+
+function buildTimeTicks(candles: CandlePoint[], preferredTickCount: number) {
+  if (candles.length === 0) {
+    return [] as TimeTick[];
+  }
+
+  if (candles.length === 1) {
+    const only = new Date(candles[0].timestamp);
+    return [
+      {
+        key: `${candles[0].timestamp}-0`,
+        label: formatTimeTickLabel(only, 0, 0),
+        ratio: 0,
+      },
+    ];
+  }
+
+  const startMs = Date.parse(candles[0].timestamp);
+  const endMs = Date.parse(candles[candles.length - 1].timestamp);
+  const spanMs = Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : 0;
+  const averageStepMs = spanMs / Math.max(1, candles.length - 1);
+  const tickCount = Math.max(2, Math.min(candles.length, preferredTickCount));
+  const seen = new Set<number>();
+  const ticks: TimeTick[] = [];
+
+  for (let tickIndex = 0; tickIndex < tickCount; tickIndex += 1) {
+    const rawIndex = (tickIndex / Math.max(1, tickCount - 1)) * (candles.length - 1);
+    const candleIndex = Math.round(rawIndex);
+    if (seen.has(candleIndex)) {
+      continue;
+    }
+
+    seen.add(candleIndex);
+    const candle = candles[candleIndex];
+    const date = new Date(candle.timestamp);
+    ticks.push({
+      key: `${candle.timestamp}-${candleIndex}`,
+      label: formatTimeTickLabel(date, spanMs, averageStepMs),
+      ratio: candleIndex / Math.max(1, candles.length - 1),
+    });
+  }
+
+  return ticks;
 }
 
 function buildTrades(markers: TradeMarker[], candles: CandlePoint[]) {
@@ -225,47 +306,69 @@ function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], widt
   return bands;
 }
 
-export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange }: ResultsPanelProps) {
+function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChange }: ResultsPanelProps) {
   const metricsShellRef = useRef<HTMLDivElement | null>(null);
   const chartWidth = 900;
   const chartHeight = 280;
-  const priceBase = result.priceSeries[0]?.close ?? 1;
-  const equityBase = result.equityCurve[0]?.equity ?? 1;
-  const normalizedCandles = result.priceSeries.map((point) => ({
-    ...point,
-    open: (point.open / priceBase) * 100,
-    high: (point.high / priceBase) * 100,
-    low: (point.low / priceBase) * 100,
-    close: (point.close / priceBase) * 100,
-  }));
-  const normalizedEquityCurve = result.equityCurve.map((point) => ({
-    ...point,
-    equity: (point.equity / equityBase) * 100,
-  }));
-  const normalizedLows = normalizedCandles.map((point) => point.low);
-  const normalizedHighs = normalizedCandles.map((point) => point.high);
-  const normalizedEquityValues = normalizedEquityCurve.map((point) => point.equity);
-  const combinedMin = Math.min(...normalizedLows, ...normalizedEquityValues);
-  const combinedMax = Math.max(...normalizedHighs, ...normalizedEquityValues);
-  const normalizedMin = combinedMin - (combinedMax - combinedMin || 1) * 0.05;
-  const normalizedMax = combinedMax + (combinedMax - combinedMin || 1) * 0.05;
-  const strategyPath = buildPath(normalizedEquityCurve, chartWidth, chartHeight, normalizedMin, normalizedMax);
   const hasPreviewSelection = selectedPreviews.length > 0;
-  const previewValueSets = selectedPreviews.map((preview) => preview.values).filter((values) => values.length > 0);
-  const allPreviewValues = previewValueSets.flat();
-  const previewMinBase = allPreviewValues.length > 0 ? Math.min(...allPreviewValues) : 0;
-  const previewMaxBase = allPreviewValues.length > 0 ? Math.max(...allPreviewValues) : 1;
-  const previewPadding = (previewMaxBase - previewMinBase || 1) * 0.05;
-  const previewMin = previewMinBase - previewPadding;
-  const previewMax = previewMaxBase + previewPadding;
-  const previewPaths = selectedPreviews.map((preview) => ({
-    preview,
-    path: buildLinePath(preview.values, chartWidth, chartHeight, previewMin, previewMax),
-  }));
-  const candleWidth = Math.max(3, chartWidth / Math.max(20, normalizedCandles.length) * 0.55);
-  const ticks = [normalizedMax, (normalizedMax + normalizedMin) / 2, normalizedMin];
-  const previewTicks = [previewMax, (previewMax + previewMin) / 2, previewMin];
-  const positionBands = buildPositionBands(result.tradeMarkers, result.priceSeries, chartWidth);
+
+  const chartModel = useMemo(() => {
+    const priceBase = result.priceSeries[0]?.close ?? 1;
+    const equityBase = result.equityCurve[0]?.equity ?? 1;
+    const normalizedCandles = result.priceSeries.map((point) => ({
+      ...point,
+      open: (point.open / priceBase) * 100,
+      high: (point.high / priceBase) * 100,
+      low: (point.low / priceBase) * 100,
+      close: (point.close / priceBase) * 100,
+    }));
+    const normalizedEquityCurve = result.equityCurve.map((point) => ({
+      ...point,
+      equity: (point.equity / equityBase) * 100,
+    }));
+    const normalizedLows = normalizedCandles.map((point) => point.low);
+    const normalizedHighs = normalizedCandles.map((point) => point.high);
+    const normalizedEquityValues = normalizedEquityCurve.map((point) => point.equity);
+    const combinedMin = Math.min(...normalizedLows, ...normalizedEquityValues);
+    const combinedMax = Math.max(...normalizedHighs, ...normalizedEquityValues);
+    const normalizedMin = combinedMin - (combinedMax - combinedMin || 1) * 0.05;
+    const normalizedMax = combinedMax + (combinedMax - combinedMin || 1) * 0.05;
+
+    return {
+      normalizedCandles,
+      normalizedMin,
+      normalizedMax,
+      strategyPath: buildPath(normalizedEquityCurve, chartWidth, chartHeight, normalizedMin, normalizedMax),
+      candleWidth: Math.max(3, chartWidth / Math.max(20, normalizedCandles.length) * 0.55),
+      ticks: [normalizedMax, (normalizedMax + normalizedMin) / 2, normalizedMin],
+      positionBands: buildPositionBands(result.tradeMarkers, result.priceSeries, chartWidth),
+    };
+  }, [chartHeight, chartWidth, result]);
+
+  const previewModel = useMemo(() => {
+    const previewValueSets = selectedPreviews.map((preview) => preview.values).filter((values) => values.length > 0);
+    const allPreviewValues = previewValueSets.flat();
+    const previewMinBase = allPreviewValues.length > 0 ? Math.min(...allPreviewValues) : 0;
+    const previewMaxBase = allPreviewValues.length > 0 ? Math.max(...allPreviewValues) : 1;
+    const previewPadding = (previewMaxBase - previewMinBase || 1) * 0.05;
+    const previewMin = previewMinBase - previewPadding;
+    const previewMax = previewMaxBase + previewPadding;
+
+    return {
+      previewMin,
+      previewMax,
+      previewTicks: [previewMax, (previewMax + previewMin) / 2, previewMin],
+      previewPaths: selectedPreviews.map((preview) => ({
+        preview,
+        path: buildLinePath(preview.values, chartWidth, chartHeight, previewMin, previewMax),
+      })),
+    };
+  }, [chartHeight, chartWidth, selectedPreviews]);
+
+  const timeTicks = useMemo(() => {
+    const preferredTickCount = Math.max(4, Math.floor(chartWidth / 140));
+    return buildTimeTicks(result.priceSeries, preferredTickCount);
+  }, [chartWidth, result.priceSeries]);
 
   useEffect(() => {
     const element = metricsShellRef.current;
@@ -381,13 +484,24 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
 
         <div className="results-chart-stage">
           <div className="results-axis is-left">
-            {(hasPreviewSelection ? previewTicks : ticks).map((tick) => (
+            {(hasPreviewSelection ? previewModel.previewTicks : chartModel.ticks).map((tick) => (
               <span key={tick}>{hasPreviewSelection ? formatSeriesTick(tick) : formatNormalizedTick(tick)}</span>
             ))}
           </div>
 
           <div className="results-chart-frame">
             <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="results-chart" preserveAspectRatio="none" aria-hidden="true">
+              {timeTicks.map((tick) => (
+                <line
+                  key={`time-grid-${tick.key}`}
+                  x1={tick.ratio * chartWidth}
+                  x2={tick.ratio * chartWidth}
+                  y1={0}
+                  y2={chartHeight}
+                  className="results-grid-line results-grid-line-time"
+                />
+              ))}
+
               {[0, 0.5, 1].map((ratio) => (
                 <line
                   key={ratio}
@@ -401,7 +515,7 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
 
               {hasPreviewSelection ? (
                 <>
-                  {previewPaths.map(({ preview, path }, index) => (
+                  {previewModel.previewPaths.map(({ preview, path }, index) => (
                     <path
                       key={preview.edgeId}
                       d={path}
@@ -412,7 +526,7 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
                 </>
               ) : (
                 <>
-                  {positionBands.map((band, index) => (
+                  {chartModel.positionBands.map((band, index) => (
                     <rect
                       key={`${band.direction}-${index}-${band.x}`}
                       x={band.x}
@@ -423,12 +537,12 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
                     />
                   ))}
 
-                  {normalizedCandles.map((candle: CandlePoint, index) => {
-                    const x = (index / Math.max(1, normalizedCandles.length - 1)) * chartWidth;
-                    const openY = scaleY(candle.open, chartHeight, normalizedMin, normalizedMax);
-                    const closeY = scaleY(candle.close, chartHeight, normalizedMin, normalizedMax);
-                    const highY = scaleY(candle.high, chartHeight, normalizedMin, normalizedMax);
-                    const lowY = scaleY(candle.low, chartHeight, normalizedMin, normalizedMax);
+                  {chartModel.normalizedCandles.map((candle: CandlePoint, index) => {
+                    const x = (index / Math.max(1, chartModel.normalizedCandles.length - 1)) * chartWidth;
+                    const openY = scaleY(candle.open, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
+                    const closeY = scaleY(candle.close, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
+                    const highY = scaleY(candle.high, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
+                    const lowY = scaleY(candle.low, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
                     const bodyY = Math.min(openY, closeY);
                     const bodyHeight = Math.max(2, Math.abs(closeY - openY));
                     const isUp = candle.close >= candle.open;
@@ -437,9 +551,9 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
                       <g key={candle.timestamp} className={`results-candle ${isUp ? "is-up" : "is-down"}`}>
                         <line x1={x} x2={x} y1={highY} y2={lowY} className="results-candle-wick" />
                         <rect
-                          x={x - candleWidth / 2}
+                          x={x - chartModel.candleWidth / 2}
                           y={bodyY}
-                          width={candleWidth}
+                          width={chartModel.candleWidth}
                           height={bodyHeight}
                           rx="1.2"
                           className="results-candle-body"
@@ -448,14 +562,26 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
                     );
                   })}
 
-                  <path d={strategyPath} className="results-line is-strategy" />
+                  <path d={chartModel.strategyPath} className="results-line is-strategy" />
                 </>
               )}
             </svg>
+
+            <div className="results-time-axis" aria-hidden="true">
+              {timeTicks.map((tick, index) => (
+                <span
+                  key={`time-label-${tick.key}`}
+                  className={`results-time-tick ${index === 0 ? "is-start" : ""} ${index === timeTicks.length - 1 ? "is-end" : ""}`}
+                  style={{ left: `${tick.ratio * 100}%` }}
+                >
+                  {tick.label}
+                </span>
+              ))}
+            </div>
           </div>
 
           <div className="results-axis is-right">
-            {(hasPreviewSelection ? previewTicks : ticks).map((tick) => (
+            {(hasPreviewSelection ? previewModel.previewTicks : chartModel.ticks).map((tick) => (
               <span key={tick}>{hasPreviewSelection ? formatSeriesTick(tick) : formatNormalizedTick(tick)}</span>
             ))}
           </div>
@@ -464,3 +590,25 @@ export function ResultsPanel({ result, selectedPreviews, onPreferredHeightChange
     </section>
   );
 }
+
+function arePreviewArraysEqual(left: SeriesPreview[], right: SeriesPreview[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export const ResultsPanel = memo(ResultsPanelComponent, (prev, next) => {
+  return (
+    prev.result === next.result &&
+    prev.onPreferredHeightChange === next.onPreferredHeightChange &&
+    arePreviewArraysEqual(prev.selectedPreviews, next.selectedPreviews)
+  );
+});

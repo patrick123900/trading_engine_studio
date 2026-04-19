@@ -8,6 +8,7 @@ interface LoadedNodeModule {
 
 const CATEGORY_COLORS: Record<string, string> = {
   Data: "#2f855a",
+  DateTime: "#0ea5e9",
   Indicator: "#0f766e",
   Logic: "#2563eb",
   Output: "#c53030",

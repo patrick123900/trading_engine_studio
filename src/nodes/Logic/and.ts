@@ -1,4 +1,5 @@
 import type { NodeModule } from "../../core/types";
+import { getLogicInputId, getLogicInputLabels } from "../../core/nodes/logicInputs";
 
 function toBooleanSeries(value: unknown) {
   if (Array.isArray(value) && value.every((entry) => typeof entry === "boolean")) {
@@ -19,7 +20,7 @@ const andNode: NodeModule = {
   definition: {
     type: "logic.and",
     title: "AND",
-    description: "Return true when both boolean inputs are true.",
+    description: "Return true when all connected boolean inputs are true.",
     color: "#3182ce",
     inputs: [
       { id: "left", label: "Left", kind: "boolean" },
@@ -30,16 +31,22 @@ const andNode: NodeModule = {
   },
   executor: {
     type: "logic.and",
-    run: ({ inputs }) => {
-      const left = toBooleanSeries(inputs.left);
-      const right = toBooleanSeries(inputs.right);
-      if (!left || !right) {
-        throw new Error("AND requires two boolean inputs.");
+    run: ({ inputs, node }) => {
+      const labels = getLogicInputLabels(node.config);
+      const streams = labels.map((label, index) => ({
+        label,
+        values: toBooleanSeries(inputs[getLogicInputId(index)]),
+      }));
+
+      if (streams.some((stream) => stream.values === null)) {
+        throw new Error("AND requires boolean input on every configured port.");
       }
 
-      const length = Math.max(left.length, right.length);
+      const resolvedStreams = streams.map((stream) => stream.values as boolean[]);
+      const length = Math.max(...resolvedStreams.map((stream) => stream.length));
       return {
-        values: Array.from({ length }, (_, index) => Boolean(left[Math.min(index, left.length - 1)]) && Boolean(right[Math.min(index, right.length - 1)])),
+        values: Array.from({ length }, (_, index) =>
+          resolvedStreams.every((stream) => Boolean(stream[Math.min(index, stream.length - 1)]))),
       };
     },
   },

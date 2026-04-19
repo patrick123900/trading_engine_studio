@@ -21,9 +21,12 @@ https://trading.skysoft.dk
   - World Bank commodity series
   - crypto sentiment via `Crypto Fear & Greed`
 - Strategy building nodes for:
+  - datetime normalization and extraction via `Timestamp Standardize`, `DateTime Parts`, `DateTime Floor`, and `Duration Constant`
   - indicators like `RSI` and `Moving Average`
   - arithmetic like `Add`, `Subtract`, `Multiply`, `Divide`, `Min`, `Max`, `Abs`, `Offset`, `Normalize Pair`
   - logic like `Comparison`, `Crosses Above`, `Crosses Below`, `AND`, `OR`, `NOT`
+    - `Comparison` supports `<`, `>`, `=`, `<=`, and `>=`
+    - `AND` and `OR` support dynamic boolean input ports in addition to the default two
   - signals and execution modeling
   - portal routing utilities
 - Backtest execution with:
@@ -35,6 +38,7 @@ https://trading.skysoft.dk
   - starting capital and dynamic position sizing
 - Results pane with:
   - normalized charting
+  - adaptive timestamp labels on the X axis (granularity adjusts to span)
   - key metrics
   - Sharpe ratio
   - CSV export
@@ -84,6 +88,7 @@ src/
   nodes/            Node modules grouped by category
     Arithmetic/
     Data/
+    DateTime/
     Indicator/
     Logic/
     Output/
@@ -163,6 +168,17 @@ YFinance Fetcher
   -> Trade Execution
 ```
 
+Date-aware flow example:
+
+```text
+YFinance Fetcher
+  -> Timestamp Standardize
+  -> DateTime Parts (ISO weekday)
+  -> Comparison (e.g. Tuesday check)
+  -> Signal
+  -> Trade Execution
+```
+
 ## Current Scope and Limitations
 
 - The app is primarily a visual strategy-design and backtesting tool
@@ -187,6 +203,11 @@ It covers:
 - result interpretation
 - node parameters and outputs
 - data-node granularity and output formats
+
+Notable behavior updates:
+
+- `YFinance Fetcher` lookback treats blank or `0` as maximum allowed bars.
+- Synthetic `1d` YFinance bars use business days (Mon-Fri) and are anchored to recent dates.
 
 ## Author
 

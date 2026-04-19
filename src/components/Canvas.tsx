@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -10,6 +10,7 @@ import {
 } from "@heroicons/react/24/outline";
 import type { BacktestResult, GraphCameraState, GraphEdge, GraphGroup, GraphNode, NodeDefinition } from "../core/types";
 import { buildPortalInInputs, buildPortalOutOutputs, getPortalInChannels, getPortalOutChannels } from "../core/nodes/portalChannels";
+import { buildLogicInputs, getLogicInputLabels } from "../core/nodes/logicInputs";
 import { ResultsPanel } from "./ResultsPanel";
 
 interface CanvasProps {
@@ -71,6 +72,9 @@ interface CanvasProps {
   onAddPortalInChannel: (nodeId: string) => void;
   onUpdatePortalInChannel: (nodeId: string, index: number, value: string) => void;
   onRemovePortalInChannel: (nodeId: string, index: number) => void;
+  onAddLogicInput: (nodeId: string) => void;
+  onUpdateLogicInput: (nodeId: string, index: number, value: string) => void;
+  onRemoveLogicInput: (nodeId: string, index: number) => void;
   onRenameNode: (nodeId: string, title: string) => void;
   onDeleteNode: (nodeId: string) => void;
   onRun: () => void;
@@ -259,6 +263,9 @@ export function Canvas({
   onAddPortalInChannel,
   onUpdatePortalInChannel,
   onRemovePortalInChannel,
+  onAddLogicInput,
+  onUpdateLogicInput,
+  onRemoveLogicInput,
   onRenameNode,
   onDeleteNode,
   onRun,
@@ -397,6 +404,10 @@ export function Canvas({
   const getNodeInputs = (node: GraphNode, definition: NodeDefinition | undefined) => {
     if (node.type === "utility.portalIn") {
       return buildPortalInInputs(node.config);
+    }
+
+    if (node.type === "logic.and" || node.type === "logic.or") {
+      return buildLogicInputs(node.config);
     }
 
     return definition?.inputs ?? [];
@@ -900,6 +911,25 @@ export function Canvas({
     [backtestResult],
   );
   const selectedPreviewEdgeSet = useMemo(() => new Set(selectedPreviewEdgeIds), [selectedPreviewEdgeIds]);
+  const selectedPreviewSeries = useMemo(() => {
+    if (!backtestResult) {
+      return [];
+    }
+
+    return selectedPreviewEdgeIds
+      .map((edgeId) => backtestResult.previewSeriesByEdgeId[edgeId] ?? null)
+      .filter((preview): preview is NonNullable<typeof preview> => preview !== null);
+  }, [backtestResult, selectedPreviewEdgeIds]);
+
+  const handlePreferredResultsHeightChange = useCallback((height: number) => {
+    const viewportHeight = viewportRef.current?.clientHeight ?? window.innerHeight;
+    const maxHeight = Math.floor(viewportHeight * 0.7);
+    const nextHeight = Math.min(height, maxHeight);
+    setPreferredResultsHeight(nextHeight);
+    if (!hasUserSizedResultsRef.current) {
+      setResultsHeight(nextHeight);
+    }
+  }, []);
 
   const stopAllInteractions = () => {
     dragStateRef.current = null;
@@ -1745,6 +1775,7 @@ export function Canvas({
             const nodeVisibleFields = visibleFields(node, definition);
             const portalOutChannels = node.type === "utility.portalOut" ? getPortalOutChannels(node.config) : [];
             const portalInChannels = node.type === "utility.portalIn" ? getPortalInChannels(node.config) : [];
+            const logicInputs = node.type === "logic.and" || node.type === "logic.or" ? getLogicInputLabels(node.config) : [];
             const longFillField = definition?.fields.find((field) => field.key === "longFillAnchor");
             const shortFillField = definition?.fields.find((field) => field.key === "shortFillAnchor");
             const slippageField = definition?.fields.find((field) => field.key === "slippagePct");
@@ -2015,7 +2046,7 @@ export function Canvas({
                     })}
                   </div>
 
-                  {nodeVisibleFields.length || node.type === "utility.portalOut" || node.type === "utility.portalIn" ? (
+                  {nodeVisibleFields.length || node.type === "utility.portalOut" || node.type === "utility.portalIn" || node.type === "logic.and" || node.type === "logic.or" ? (
                     <div className="node-fields">
                       {nodeVisibleFields.map((field) => {
                       const value = node.config[field.key] ?? field.defaultValue;
@@ -2140,7 +2171,9 @@ export function Canvas({
                                     const rawValue = editingNumberFields[numberFieldKey];
                                     if (rawValue !== undefined) {
                                       const parsed = Number(rawValue);
-                                      if (rawValue !== "" && Number.isFinite(parsed)) {
+                                      if (rawValue === "") {
+                                        onUpdateNodeConfig(node.id, field.key, "");
+                                      } else if (Number.isFinite(parsed)) {
                                         onUpdateNodeConfig(node.id, field.key, parsed);
                                       }
                                     }
@@ -2332,6 +2365,45 @@ export function Canvas({
                               onAddPortalInChannel(node.id);
                             }}
                             aria-label="Add channel input"
+                          >
+                            +
+                          </button>
+                        </div>
+                      ) : null}
+                      {node.type === "logic.and" || node.type === "logic.or" ? (
+                        <div className="portal-channel-list" onClick={(event) => event.stopPropagation()}>
+                          {logicInputs.map((label, index) => (
+                            <label key={`${node.id}-logic-input-${index}`} className="node-field">
+                              <span className="node-field-label-row">
+                                <span className="node-field-label">Input {index + 1}</span>
+                                {index > 1 ? (
+                                  <button
+                                    type="button"
+                                    className="portal-channel-delete"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onRemoveLogicInput(node.id, index);
+                                    }}
+                                  >
+                                    ×
+                                  </button>
+                                ) : null}
+                              </span>
+                              <input
+                                type="text"
+                                value={label}
+                                onChange={(event) => onUpdateLogicInput(node.id, index, event.target.value)}
+                              />
+                            </label>
+                          ))}
+                          <button
+                            type="button"
+                            className="portal-channel-add"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onAddLogicInput(node.id);
+                            }}
+                            aria-label="Add boolean input"
                           >
                             +
                           </button>
@@ -2545,18 +2617,8 @@ export function Canvas({
               />
               <ResultsPanel
                 result={backtestResult}
-                selectedPreviews={selectedPreviewEdgeIds
-                  .map((edgeId) => backtestResult.previewSeriesByEdgeId[edgeId] ?? null)
-                  .filter((preview): preview is NonNullable<typeof preview> => preview !== null)}
-                onPreferredHeightChange={(height) => {
-                  const viewportHeight = viewportRef.current?.clientHeight ?? window.innerHeight;
-                  const maxHeight = Math.floor(viewportHeight * 0.7);
-                  const nextHeight = Math.min(height, maxHeight);
-                  setPreferredResultsHeight(nextHeight);
-                  if (!hasUserSizedResultsRef.current) {
-                    setResultsHeight(nextHeight);
-                  }
-                }}
+                selectedPreviews={selectedPreviewSeries}
+                onPreferredHeightChange={handlePreferredResultsHeightChange}
               />
             </>
           )}

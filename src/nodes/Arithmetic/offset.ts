@@ -1,5 +1,7 @@
 import type { NodeModule } from "../../core/types";
 
+type OffsetValue = number | boolean;
+
 function readNumber(value: unknown, fallback: number) {
   return typeof value === "number" ? value : fallback;
 }
@@ -8,7 +10,10 @@ function toSeriesInput(value: unknown) {
   if (value && typeof value === "object" && "values" in value) {
     const values = (value as { values?: unknown }).values;
     const timestamps = (value as { timestamps?: unknown }).timestamps;
-    if (Array.isArray(values) && values.every((entry) => typeof entry === "number")) {
+    if (
+      Array.isArray(values) &&
+      values.every((entry) => typeof entry === "number" || typeof entry === "boolean")
+    ) {
       return {
         values,
         timestamps: Array.isArray(timestamps)
@@ -31,14 +36,17 @@ function toSeriesInput(value: unknown) {
     }
   }
 
-  if (Array.isArray(value) && value.every((entry) => typeof entry === "number")) {
+  if (
+    Array.isArray(value) &&
+    value.every((entry) => typeof entry === "number" || typeof entry === "boolean")
+  ) {
     return {
       values: value,
       timestamps: [] as string[],
     };
   }
 
-  if (typeof value === "number") {
+  if (typeof value === "number" || typeof value === "boolean") {
     return {
       values: [value],
       timestamps: [] as string[],
@@ -48,7 +56,7 @@ function toSeriesInput(value: unknown) {
   return null;
 }
 
-function offsetValues(values: number[], bars: number) {
+function offsetValues(values: OffsetValue[], bars: number) {
   if (values.length === 0 || bars === 0) {
     return values;
   }
@@ -69,7 +77,7 @@ const offsetNode: NodeModule = {
   definition: {
     type: "arithmetic.offset",
     title: "Offset",
-    description: "Shift a numeric series by a whole number of bars.",
+    description: "Shift a numeric or boolean series by a whole number of bars.",
     color: "#f59e0b",
     inputs: [{ id: "source", label: "Source", kind: "series" }],
     outputs: [{ id: "series", label: "Offset", kind: "series" }],
@@ -82,7 +90,7 @@ const offsetNode: NodeModule = {
       const bars = Math.trunc(readNumber(node.config.bars, 1));
 
       if (!source || source.values.length === 0) {
-        throw new Error("Offset requires a numeric series or dataset input.");
+        throw new Error("Offset requires a numeric or boolean series (or a dataset).");
       }
 
       return {

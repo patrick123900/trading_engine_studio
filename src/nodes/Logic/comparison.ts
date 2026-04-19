@@ -63,6 +63,8 @@ const comparisonNode: NodeModule = {
         options: [
           { label: "<", value: "lt" },
           { label: ">", value: "gt" },
+          { label: "<=", value: "lte" },
+          { label: ">=", value: "gte" },
           { label: "=", value: "eq" },
         ],
       },
@@ -87,8 +89,16 @@ const comparisonNode: NodeModule = {
         switch (operator) {
           case "gt":
             return leftValue > rightValue;
+          case "gte":
+          case "ge":
+          case "=>":
+            return leftValue >= rightValue;
           case "eq":
             return Math.abs(leftValue - rightValue) < 0.0001;
+          case "lte":
+          case "le":
+          case "=<":
+            return leftValue < rightValue || Math.abs(leftValue - rightValue) < 0.0001;
           case "lt":
             return leftValue < rightValue;
           default:

@@ -10,6 +10,11 @@ import {
   getPortalOutOutputId,
   getPortalOutOutputIndex,
 } from "./core/nodes/portalChannels";
+import {
+  getLogicInputId,
+  getLogicInputIndex,
+  getLogicInputLabels,
+} from "./core/nodes/logicInputs";
 import { defaultNodeRegistry } from "./core/nodes/registry";
 import {
   deleteStoredGraph,
@@ -154,7 +159,7 @@ function getCustomFieldDoc(definition: NodeDefinition, fieldKey: string) {
     "data.yfinance": {
       symbol: "Ticker symbol to generate data for, such as AAPL.",
       interval: "Bar length for the returned candles: 1 day, 1 hour, or 15 minutes.",
-      lookback: "Number of bars to return.",
+      lookback: "Number of bars to return. Leave blank or set to 0 to use the maximum allowed bars.",
     },
     "data.alternativeCryptoMarket": {
       symbol: "Binance market symbol such as BTCUSDT.",
@@ -191,13 +196,32 @@ function getCustomFieldDoc(definition: NodeDefinition, fieldKey: string) {
       length: "Number of bars used in the moving average.",
     },
     "logic.comparison": {
-      operator: "Comparison operator applied between Left and Right.",
+      operator: "Comparison operator applied between Left and Right. Supports <, >, =, <=, and >=.",
     },
     "logic.fixedValue": {
       value: "Constant numeric value emitted by the node.",
     },
     "arithmetic.offset": {
-      bars: "Positive values shift the source right in time, so the current bar sees older values. Negative values shift left and introduce lookahead.",
+      bars:
+        "Positive values shift the source right in time, so the current bar sees older values. Negative values shift left and introduce lookahead. Works for numeric and boolean series.",
+    },
+    "datetime.standardize": {
+      inputMode:
+        "Auto accepts ISO strings or epoch numbers and infers seconds vs milliseconds. Choose a fixed mode if your source format is known.",
+    },
+    "datetime.duration": {
+      amount: "Numeric size of the duration.",
+      unit:
+        "Duration unit converted to epoch milliseconds. Use this output with Add/Subtract nodes to move timestamps in time.",
+    },
+    "datetime.parts": {
+      timezone:
+        "UTC is deterministic across machines and recommended for backtests. Local uses the browser's timezone.",
+    },
+    "datetime.floor": {
+      unit: "Boundary used for flooring, such as day or week.",
+      timezone: "Timezone basis used to determine boundary cutoffs.",
+      weekStartsOn: "Only used when unit is Week.",
     },
   };
 
@@ -287,6 +311,8 @@ function getCustomNodeNotes(definition: NodeDefinition) {
     "data.yfinance": [
       "Granularity is customizable between daily, hourly, and 15-minute bars.",
       "This node outputs true OHLC arrays plus timestamps and symbol information.",
+      "Lookback accepts blank or 0 as 'maximum bars'.",
+      "Daily bars are business-day aligned (Mon-Fri) and synthetic timestamps are anchored to recent dates.",
     ],
     "data.alternativeCryptoMarket": [
       "Granularity is customizable from 1 minute through 1 day depending on the selected Binance interval.",
@@ -311,6 +337,18 @@ function getCustomNodeNotes(definition: NodeDefinition) {
     "output.signal": [
       "Long and Short signals are edge-triggered: they only fire when input changes from false to true.",
       "Close is level-triggered: it stays active for as long as the input stays true, so it can keep requesting a close condition until the position is flat.",
+    ],
+    "logic.and": [
+      "AND starts with two inputs and supports adding more boolean inputs from the node panel.",
+      "All configured boolean inputs must evaluate true for the output to be true.",
+    ],
+    "logic.or": [
+      "OR starts with two inputs and supports adding more boolean inputs from the node panel.",
+      "Output is true when at least one configured boolean input is true.",
+    ],
+    "datetime.standardize": [
+      "Use this node to normalize mixed timestamp formats into consistent epoch-millisecond series.",
+      "It is typically the first step before DateTime Parts, DateTime Floor, or datetime arithmetic with Duration Constant.",
     ],
     "trading.execution": [
       "This node is where the backtest engine gets its execution assumptions: capital, sizing, fill anchors, slippage, commissions, and whether shorts may be opened.",
@@ -345,6 +383,7 @@ function createDocumentationTopics(definitions: NodeDefinition[]): Documentation
           heading: "Typical Workflow",
           bullets: [
             "Add a data source such as YFinance, crypto data, ECB FX, EIA energy, or World Bank commodities.",
+            "Normalize timestamps when needed with DateTime nodes such as Timestamp Standardize and DateTime Parts.",
             "Convert or derive series with nodes like OHLC Source, RSI, MA, Offset, Arithmetic, Crosses Above, Crosses Below, AND, OR, and NOT.",
             "Turn logic into trade intent with Signal nodes.",
             "Feed Product and Signals into Trade Execution.",
@@ -471,6 +510,7 @@ function createDocumentationTopics(definitions: NodeDefinition[]): Documentation
             "The pane can be resized or collapsed.",
             "The execution log is available from View -> Execution Log.",
             "The default chart shows normalized product price and strategy equity.",
+            "The X axis shows adaptive timestamp labels that auto-adjust granularity to the tested timespan.",
           ],
         },
         {
@@ -591,6 +631,9 @@ function buildNodeFromDefinition(definition: NodeDefinition, x: number, y: numbe
     config.channel = channels[0];
     config.channels = channels;
   }
+  if (definition.type === "logic.and" || definition.type === "logic.or") {
+    config.inputs = getLogicInputLabels(config);
+  }
 
   return {
     id: `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -702,6 +745,17 @@ function normalizeGraph(graph: StrategyGraph): StrategyGraph {
       };
     }
 
+    if (node.type === "logic.and" || node.type === "logic.or") {
+      const inputs = getLogicInputLabels(node.config);
+      return {
+        ...node,
+        config: {
+          ...node.config,
+          inputs,
+        },
+      };
+    }
+
     return node;
   });
 
@@ -792,8 +846,10 @@ function estimateNodeHeight(node: GraphNode, definitionsByType: Map<string, Node
   }
 
   const inputCount = node.type === "utility.portalIn" ? getPortalInChannels(node.config).length : definition.inputs.length;
+  const logicInputCount =
+    node.type === "logic.and" || node.type === "logic.or" ? getLogicInputLabels(node.config).length : inputCount;
   const outputCount = node.type === "utility.portalOut" ? getPortalOutChannels(node.config).length : definition.outputs.length;
-  const portRows = Math.max(inputCount, outputCount, 1);
+  const portRows = Math.max(logicInputCount, outputCount, 1);
   const portsHeight = 14 + portRows * ALIGN_PORT_ROW_HEIGHT + 10;
   const fieldsHeight = definition.fields.length
     ? 14 +
@@ -2735,6 +2791,106 @@ function AppInner() {
     });
   };
 
+  const addLogicInput = (nodeId: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || (node.type !== "logic.and" && node.type !== "logic.or")) {
+          return node;
+        }
+
+        const inputs = getLogicInputLabels(node.config);
+        const nextInputs = [...inputs, `Input ${inputs.length + 1}`];
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            inputs: nextInputs,
+          },
+        };
+      }),
+    }));
+  };
+
+  const updateLogicInput = (nodeId: string, index: number, value: string) => {
+    commitGraph((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId || (node.type !== "logic.and" && node.type !== "logic.or")) {
+          return node;
+        }
+
+        const inputs = getLogicInputLabels(node.config);
+        if (index < 0 || index >= inputs.length) {
+          return node;
+        }
+
+        const nextInputs = [...inputs];
+        nextInputs[index] = value;
+
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            inputs: nextInputs,
+          },
+        };
+      }),
+    }));
+  };
+
+  const removeLogicInput = (nodeId: string, index: number) => {
+    commitGraph((current) => {
+      const node = current.nodes.find(
+        (entry) => entry.id === nodeId && (entry.type === "logic.and" || entry.type === "logic.or"),
+      );
+      if (!node) {
+        return current;
+      }
+
+      const inputs = getLogicInputLabels(node.config);
+      if (index < 2 || index >= inputs.length) {
+        return current;
+      }
+
+      const nextInputs = inputs.filter((_, inputIndex) => inputIndex !== index);
+      const removedPortId = getLogicInputId(index);
+
+      return {
+        ...current,
+        nodes: current.nodes.map((entry) =>
+          entry.id === nodeId
+            ? {
+                ...entry,
+                config: {
+                  ...entry.config,
+                  inputs: nextInputs,
+                },
+              }
+            : entry,
+        ),
+        edges: current.edges
+          .filter((edge) => !(edge.toNodeId === nodeId && edge.toPortId === removedPortId))
+          .map((edge) => {
+            if (edge.toNodeId !== nodeId) {
+              return edge;
+            }
+
+            const inputIndex = getLogicInputIndex(edge.toPortId);
+            if (inputIndex === null || inputIndex <= index) {
+              return edge;
+            }
+
+            return {
+              ...edge,
+              toPortId: getLogicInputId(inputIndex - 1),
+            };
+          }),
+      };
+    });
+  };
+
   const renameNode = (nodeId: string, title: string) => {
     commitGraph((current) => ({
       ...current,
@@ -3076,6 +3232,9 @@ function AppInner() {
         onAddPortalInChannel={addPortalInChannel}
         onUpdatePortalInChannel={updatePortalInChannel}
         onRemovePortalInChannel={removePortalInChannel}
+        onAddLogicInput={addLogicInput}
+        onUpdateLogicInput={updateLogicInput}
+        onRemoveLogicInput={removeLogicInput}
         onRenameNode={renameNode}
         onDeleteNode={removeNode}
         onRun={runGraph}
