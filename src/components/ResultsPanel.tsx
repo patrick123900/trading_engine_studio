@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { BacktestResult, CandlePoint, EquityPoint, SeriesPreview, TradeMarker } from "../core/types";
 
 interface ResultsPanelProps {
@@ -45,6 +45,33 @@ function buildLinePath(values: number[], width: number, height: number, min: num
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
+}
+
+function buildPartialPath(
+  values: number[],
+  width: number,
+  height: number,
+  min: number,
+  max: number,
+  startIndex: number,
+  endIndex: number,
+) {
+  if (values.length === 0 || max === min || endIndex < startIndex) {
+    return "";
+  }
+
+  const span = Math.max(1, endIndex - startIndex);
+  const clampedStart = Math.max(0, Math.min(startIndex, values.length - 1));
+  const clampedEnd = Math.max(clampedStart, Math.min(endIndex, values.length - 1));
+  const points: string[] = [];
+
+  for (let index = clampedStart; index <= clampedEnd; index += 1) {
+    const x = ((index - clampedStart) / span) * width;
+    const y = height - ((values[index] - min) / (max - min || 1)) * height;
+    points.push(`${index === clampedStart ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`);
+  }
+
+  return points.join(" ");
 }
 
 function scaleY(value: number, height: number, min: number, max: number) {
@@ -271,7 +298,7 @@ function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], widt
     .filter((entry) => entry.index >= 0)
     .sort((left, right) => left.index - right.index);
 
-  const bands: Array<{ x: number; width: number; direction: "long" | "short" }> = [];
+  const bands: Array<{ startIndex: number; endIndex: number; direction: "long" | "short" }> = [];
   let active: { direction: "long" | "short"; startIndex: number } | null = null;
 
   for (const entry of sortedMarkers) {
@@ -284,21 +311,18 @@ function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], widt
       continue;
     }
 
-    const startX = (active.startIndex / Math.max(1, candles.length - 1)) * width;
-    const endX = (entry.index / Math.max(1, candles.length - 1)) * width;
     bands.push({
-      x: startX,
-      width: Math.max(2, endX - startX),
+      startIndex: active.startIndex,
+      endIndex: entry.index,
       direction: active.direction,
     });
     active = null;
   }
 
   if (active) {
-    const startX = (active.startIndex / Math.max(1, candles.length - 1)) * width;
     bands.push({
-      x: startX,
-      width: Math.max(2, width - startX),
+      startIndex: active.startIndex,
+      endIndex: Math.max(active.startIndex, candles.length - 1),
       direction: active.direction,
     });
   }
@@ -306,11 +330,136 @@ function buildPositionBands(markers: TradeMarker[], candles: CandlePoint[], widt
   return bands;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampWindow(window: { start: number; end: number }, minSpan: number) {
+  const span = clamp(window.end - window.start, minSpan, 1);
+  const maxStart = Math.max(0, 1 - span);
+  const start = clamp(window.start, 0, maxStart);
+  const end = start + span;
+  return { start, end };
+}
+
+function indexRangeFromWindow(length: number, window: { start: number; end: number }) {
+  if (length <= 1) {
+    return { startIndex: 0, endIndex: Math.max(0, length - 1) };
+  }
+
+  const lastIndex = length - 1;
+  const startIndex = clamp(Math.floor(window.start * lastIndex), 0, lastIndex - 1);
+  const endIndex = clamp(Math.ceil(window.end * lastIndex), startIndex + 1, lastIndex);
+  return { startIndex, endIndex };
+}
+
 function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChange }: ResultsPanelProps) {
   const metricsShellRef = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const panStateRef = useRef<{ startX: number; start: number; span: number } | null>(null);
   const chartWidth = 900;
   const chartHeight = 280;
   const hasPreviewSelection = selectedPreviews.length > 0;
+  const [viewWindow, setViewWindow] = useState({ start: 0, end: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+
+  const totalBars = useMemo(() => {
+    if (hasPreviewSelection) {
+      return Math.max(...selectedPreviews.map((preview) => preview.values.length), result.priceSeries.length, 1);
+    }
+
+    return Math.max(result.priceSeries.length, result.equityCurve.length, 1);
+  }, [hasPreviewSelection, result.equityCurve.length, result.priceSeries.length, selectedPreviews]);
+
+  const minViewSpan = useMemo(() => {
+    const minBars = 20;
+    if (totalBars <= 1) {
+      return 1;
+    }
+
+    return Math.min(1, Math.max(minBars / totalBars, 0.01));
+  }, [totalBars]);
+
+  useEffect(() => {
+    setViewWindow((current) => clampWindow(current, minViewSpan));
+  }, [minViewSpan]);
+
+  useEffect(() => {
+    setViewWindow({ start: 0, end: 1 });
+  }, [result]);
+
+  useEffect(() => {
+    if (!isPanning) {
+      return;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const pan = panStateRef.current;
+      const frame = frameRef.current;
+      if (!pan || !frame) {
+        return;
+      }
+
+      const width = frame.getBoundingClientRect().width;
+      if (width <= 0) {
+        return;
+      }
+
+      const deltaRatio = (event.clientX - pan.startX) / width;
+      const nextStart = pan.start - deltaRatio * pan.span;
+      setViewWindow(clampWindow({ start: nextStart, end: nextStart + pan.span }, minViewSpan));
+    };
+
+    const handleMouseUp = () => {
+      panStateRef.current = null;
+      setIsPanning(false);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isPanning, minViewSpan]);
+
+  const handleChartWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const frame = frameRef.current;
+    if (!frame) {
+      return;
+    }
+
+    const rect = frame.getBoundingClientRect();
+    if (rect.width <= 0) {
+      return;
+    }
+
+    const cursorRatio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    setViewWindow((current) => {
+      const span = current.end - current.start;
+      const zoomFactor = Math.exp(event.deltaY * 0.0012);
+      const nextSpan = clamp(span * zoomFactor, minViewSpan, 1);
+      const anchor = current.start + cursorRatio * span;
+      const nextStart = anchor - cursorRatio * nextSpan;
+      return clampWindow({ start: nextStart, end: nextStart + nextSpan }, minViewSpan);
+    });
+  };
+
+  const handleChartMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const span = viewWindow.end - viewWindow.start;
+    panStateRef.current = {
+      startX: event.clientX,
+      start: viewWindow.start,
+      span,
+    };
+    setIsPanning(true);
+  };
 
   const chartModel = useMemo(() => {
     const priceBase = result.priceSeries[0]?.close ?? 1;
@@ -326,28 +475,53 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
       ...point,
       equity: (point.equity / equityBase) * 100,
     }));
-    const normalizedLows = normalizedCandles.map((point) => point.low);
-    const normalizedHighs = normalizedCandles.map((point) => point.high);
-    const normalizedEquityValues = normalizedEquityCurve.map((point) => point.equity);
+    const visibleCandleRange = indexRangeFromWindow(normalizedCandles.length, viewWindow);
+    const visibleEquityRange = indexRangeFromWindow(normalizedEquityCurve.length, viewWindow);
+    const visibleCandles = normalizedCandles.slice(visibleCandleRange.startIndex, visibleCandleRange.endIndex + 1);
+    const visibleEquityValues = normalizedEquityCurve
+      .slice(visibleEquityRange.startIndex, visibleEquityRange.endIndex + 1)
+      .map((point) => point.equity);
+    const normalizedLows = visibleCandles.map((point) => point.low);
+    const normalizedHighs = visibleCandles.map((point) => point.high);
+    const normalizedEquityValues = visibleEquityValues;
     const combinedMin = Math.min(...normalizedLows, ...normalizedEquityValues);
     const combinedMax = Math.max(...normalizedHighs, ...normalizedEquityValues);
     const normalizedMin = combinedMin - (combinedMax - combinedMin || 1) * 0.05;
     const normalizedMax = combinedMax + (combinedMax - combinedMin || 1) * 0.05;
+    const totalVisibleCandles = Math.max(2, visibleCandleRange.endIndex - visibleCandleRange.startIndex + 1);
 
     return {
       normalizedCandles,
+      visibleCandleRange,
       normalizedMin,
       normalizedMax,
-      strategyPath: buildPath(normalizedEquityCurve, chartWidth, chartHeight, normalizedMin, normalizedMax),
-      candleWidth: Math.max(3, chartWidth / Math.max(20, normalizedCandles.length) * 0.55),
+      strategyPath: buildPartialPath(
+        normalizedEquityCurve.map((point) => point.equity),
+        chartWidth,
+        chartHeight,
+        normalizedMin,
+        normalizedMax,
+        visibleEquityRange.startIndex,
+        visibleEquityRange.endIndex,
+      ),
+      candleWidth: Math.max(3, chartWidth / Math.max(20, totalVisibleCandles) * 0.55),
       ticks: [normalizedMax, (normalizedMax + normalizedMin) / 2, normalizedMin],
       positionBands: buildPositionBands(result.tradeMarkers, result.priceSeries, chartWidth),
     };
-  }, [chartHeight, chartWidth, result]);
+  }, [chartHeight, chartWidth, result, viewWindow]);
 
   const previewModel = useMemo(() => {
-    const previewValueSets = selectedPreviews.map((preview) => preview.values).filter((values) => values.length > 0);
-    const allPreviewValues = previewValueSets.flat();
+    const previewSlices = selectedPreviews
+      .map((preview) => {
+        const range = indexRangeFromWindow(preview.values.length, viewWindow);
+        return {
+          preview,
+          range,
+          values: preview.values.slice(range.startIndex, range.endIndex + 1),
+        };
+      })
+      .filter((entry) => entry.values.length > 0);
+    const allPreviewValues = previewSlices.flatMap((entry) => entry.values);
     const previewMinBase = allPreviewValues.length > 0 ? Math.min(...allPreviewValues) : 0;
     const previewMaxBase = allPreviewValues.length > 0 ? Math.max(...allPreviewValues) : 1;
     const previewPadding = (previewMaxBase - previewMinBase || 1) * 0.05;
@@ -358,17 +532,30 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
       previewMin,
       previewMax,
       previewTicks: [previewMax, (previewMax + previewMin) / 2, previewMin],
-      previewPaths: selectedPreviews.map((preview) => ({
-        preview,
-        path: buildLinePath(preview.values, chartWidth, chartHeight, previewMin, previewMax),
-      })),
+      previewPaths: selectedPreviews.map((preview) => {
+        const range = indexRangeFromWindow(preview.values.length, viewWindow);
+        return {
+          preview,
+          path: buildPartialPath(
+            preview.values,
+            chartWidth,
+            chartHeight,
+            previewMin,
+            previewMax,
+            range.startIndex,
+            range.endIndex,
+          ),
+        };
+      }),
     };
-  }, [chartHeight, chartWidth, selectedPreviews]);
+  }, [chartHeight, chartWidth, selectedPreviews, viewWindow]);
 
   const timeTicks = useMemo(() => {
     const preferredTickCount = Math.max(4, Math.floor(chartWidth / 140));
-    return buildTimeTicks(result.priceSeries, preferredTickCount);
-  }, [chartWidth, result.priceSeries]);
+    const priceRange = indexRangeFromWindow(result.priceSeries.length, viewWindow);
+    const visiblePrices = result.priceSeries.slice(priceRange.startIndex, priceRange.endIndex + 1);
+    return buildTimeTicks(visiblePrices, preferredTickCount);
+  }, [chartWidth, result.priceSeries, viewWindow]);
 
   useEffect(() => {
     const element = metricsShellRef.current;
@@ -489,7 +676,13 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
             ))}
           </div>
 
-          <div className="results-chart-frame">
+          <div
+            ref={frameRef}
+            className={`results-chart-frame ${isPanning ? "is-panning" : ""}`}
+            onWheel={handleChartWheel}
+            onMouseDown={handleChartMouseDown}
+            role="presentation"
+          >
             <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="results-chart" preserveAspectRatio="none" aria-hidden="true">
               {timeTicks.map((tick) => (
                 <line
@@ -526,19 +719,36 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
                 </>
               ) : (
                 <>
-                  {chartModel.positionBands.map((band, index) => (
-                    <rect
-                      key={`${band.direction}-${index}-${band.x}`}
-                      x={band.x}
-                      y="0"
-                      width={band.width}
-                      height={chartHeight}
-                      className={`results-position-band is-${band.direction}`}
-                    />
-                  ))}
+                  {chartModel.positionBands
+                    .map((band, index) => ({ band, index }))
+                    .filter(({ band }) =>
+                      band.endIndex >= chartModel.visibleCandleRange.startIndex &&
+                      band.startIndex <= chartModel.visibleCandleRange.endIndex,
+                    )
+                    .map(({ band, index }) => {
+                      const span = Math.max(1, chartModel.visibleCandleRange.endIndex - chartModel.visibleCandleRange.startIndex);
+                      const visibleStart = Math.max(band.startIndex, chartModel.visibleCandleRange.startIndex);
+                      const visibleEnd = Math.min(band.endIndex, chartModel.visibleCandleRange.endIndex);
+                      const x = ((visibleStart - chartModel.visibleCandleRange.startIndex) / span) * chartWidth;
+                      const xEnd = ((visibleEnd - chartModel.visibleCandleRange.startIndex) / span) * chartWidth;
 
-                  {chartModel.normalizedCandles.map((candle: CandlePoint, index) => {
-                    const x = (index / Math.max(1, chartModel.normalizedCandles.length - 1)) * chartWidth;
+                      return (
+                        <rect
+                          key={`${band.direction}-${index}-${band.startIndex}`}
+                          x={x}
+                          y="0"
+                          width={Math.max(2, xEnd - x)}
+                          height={chartHeight}
+                          className={`results-position-band is-${band.direction}`}
+                        />
+                      );
+                    })}
+
+                  {chartModel.normalizedCandles
+                    .slice(chartModel.visibleCandleRange.startIndex, chartModel.visibleCandleRange.endIndex + 1)
+                    .map((candle: CandlePoint, offset) => {
+                    const span = Math.max(1, chartModel.visibleCandleRange.endIndex - chartModel.visibleCandleRange.startIndex);
+                    const x = (offset / span) * chartWidth;
                     const openY = scaleY(candle.open, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
                     const closeY = scaleY(candle.close, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);
                     const highY = scaleY(candle.high, chartHeight, chartModel.normalizedMin, chartModel.normalizedMax);

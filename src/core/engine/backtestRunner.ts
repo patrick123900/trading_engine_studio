@@ -42,6 +42,20 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function hasBlockingUpstreamFailure(
+  graph: StrategyGraph,
+  nodeId: string,
+  outputsByNodeId: Map<string, Record<string, unknown>>,
+  pendingErrors: ExecutionErrorMap,
+) {
+  return graph.edges.some(
+    (edge) =>
+      edge.toNodeId === nodeId &&
+      pendingErrors.has(edge.fromNodeId) &&
+      !outputsByNodeId.has(edge.fromNodeId),
+  );
+}
+
 function validateGraph(graph: StrategyGraph): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
@@ -346,6 +360,11 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
       await delay(options.stepDelayMs);
     }
 
+    if (hasBlockingUpstreamFailure(graph, node.id, outputsByNodeId, pendingErrors)) {
+      pendingErrors.set(node.id, new Error("Skipped: upstream node failed."));
+      continue;
+    }
+
     try {
       const outputRecord = await executeNode(graph, node, outputsByNodeId, portalInputsByChannel);
       outputsByNodeId.set(node.id, outputRecord);
@@ -361,7 +380,11 @@ async function executeGraph(graph: StrategyGraph, options: RunBacktestOptions): 
   await stabilizeExecutionFeedback(graph, snapshot, pendingErrors);
 
   for (const [nodeId, error] of pendingErrors) {
-    if (!outputsByNodeId.has(nodeId)) {
+    if (
+      !outputsByNodeId.has(nodeId) &&
+      !hasBlockingUpstreamFailure(graph, nodeId, snapshot.outputsByNodeId, pendingErrors) &&
+      error.message !== "Skipped: upstream node failed."
+    ) {
       options.onNodeError?.(nodeId, error);
     }
   }
@@ -384,6 +407,11 @@ async function stabilizeExecutionFeedback(
 
   for (let iteration = 0; iteration < 6; iteration += 1) {
     for (const node of snapshot.orderedNodes) {
+      if (hasBlockingUpstreamFailure(graph, node.id, snapshot.outputsByNodeId, pendingErrors)) {
+        pendingErrors.set(node.id, new Error("Skipped: upstream node failed."));
+        continue;
+      }
+
       try {
         snapshot.outputsByNodeId.set(
           node.id,

@@ -158,7 +158,7 @@ function getCustomFieldDoc(definition: NodeDefinition, fieldKey: string) {
     },
     "data.yfinance": {
       symbol: "Ticker symbol to generate data for, such as AAPL.",
-      interval: "Bar length for the returned candles: 1 day, 1 hour, or 15 minutes.",
+      interval: "Bar length for the returned candles: 1 day, 1 hour, 15 minutes, 5 minutes, or 1 minute.",
       lookback: "Number of bars to return. Leave blank or set to 0 to use the maximum allowed bars.",
     },
     "data.alternativeCryptoMarket": {
@@ -309,7 +309,7 @@ function getCustomOutputDoc(definition: NodeDefinition, outputId: string) {
 function getCustomNodeNotes(definition: NodeDefinition) {
   const notes: Record<string, string[]> = {
     "data.yfinance": [
-      "Granularity is customizable between daily, hourly, and 15-minute bars.",
+      "Granularity is customizable between daily, hourly, 15-minute, 5-minute, and 1-minute bars.",
       "This node outputs true OHLC arrays plus timestamps and symbol information.",
       "Lookback accepts blank or 0 as 'maximum bars'.",
       "Daily bars are business-day aligned (Mon-Fri) and synthetic timestamps are anchored to recent dates.",
