@@ -82,6 +82,7 @@ type MarketDataShape = {
   high: number[];
   low: number[];
   close: number[];
+  volume: number[];
 };
 
 interface YahooChartResponse {
@@ -97,6 +98,7 @@ interface YahooChartResponse {
           high?: Array<number | null>;
           low?: Array<number | null>;
           close?: Array<number | null>;
+          volume?: Array<number | null>;
         }>;
       };
     }>;
@@ -137,6 +139,7 @@ function cloneAndClipMarketData(source: MarketDataShape, bars: number): MarketDa
     high: source.high.slice(-count),
     low: source.low.slice(-count),
     close: source.close.slice(-count),
+    volume: source.volume.slice(-count),
   };
 }
 
@@ -256,6 +259,7 @@ async function fetchYahooMarketData(symbol: string, interval: string, bars: numb
   const high = quote?.high ?? [];
   const low = quote?.low ?? [];
   const close = quote?.close ?? [];
+  const volume = quote?.volume ?? [];
 
   const rows = timestamps
     .map((timestamp, index) => {
@@ -263,13 +267,15 @@ async function fetchYahooMarketData(symbol: string, interval: string, bars: numb
       const highValue = high[index];
       const lowValue = low[index];
       const closeValue = close[index];
+      const volumeValue = volume[index];
 
       if (
         !Number.isFinite(timestamp) ||
         !Number.isFinite(openValue) ||
         !Number.isFinite(highValue) ||
         !Number.isFinite(lowValue) ||
-        !Number.isFinite(closeValue)
+        !Number.isFinite(closeValue) ||
+        !Number.isFinite(volumeValue)
       ) {
         return null;
       }
@@ -280,10 +286,11 @@ async function fetchYahooMarketData(symbol: string, interval: string, bars: numb
         high: Number((highValue as number).toFixed(2)),
         low: Number((lowValue as number).toFixed(2)),
         close: Number((closeValue as number).toFixed(2)),
+        volume: Math.max(0, Math.floor(volumeValue as number)),
       };
     })
     .filter(
-      (entry): entry is { timestamp: string; open: number; high: number; low: number; close: number } =>
+      (entry): entry is { timestamp: string; open: number; high: number; low: number; close: number; volume: number } =>
         entry !== null,
     );
 
@@ -300,6 +307,7 @@ async function fetchYahooMarketData(symbol: string, interval: string, bars: numb
     high: clipped.map((entry) => entry.high),
     low: clipped.map((entry) => entry.low),
     close: clipped.map((entry) => entry.close),
+    volume: clipped.map((entry) => entry.volume),
   };
 }
 
