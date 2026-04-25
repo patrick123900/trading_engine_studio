@@ -143,7 +143,9 @@ const PORT_RADIUS = PORT_DOT_SIZE / 2;
 const WORLD_SIZE = 50000;
 const WORLD_ORIGIN = WORLD_SIZE / 2;
 const MIN_ZOOM = 0.45;
-const MAX_ZOOM = 2.2;
+const MAX_ZOOM = 1.55;
+const WHEEL_ZOOM_OUT_FACTOR = 0.96;
+const WHEEL_ZOOM_IN_FACTOR = 1.04;
 const ZOOM_SLIDER_MIN = 0;
 const ZOOM_SLIDER_MAX = 100;
 const ZOOM_SLIDER_MID = 50;
@@ -151,7 +153,17 @@ function clampCamera(
   nextCamera: { x: number; y: number; zoom: number },
   canvasSize: { width: number; height: number },
 ) {
-  return nextCamera;
+  const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, nextCamera.zoom));
+  const dpr = typeof window !== "undefined" && Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+    ? window.devicePixelRatio
+    : 1;
+
+  return {
+    ...nextCamera,
+    zoom: clampedZoom,
+    x: Math.round(nextCamera.x * dpr) / dpr,
+    y: Math.round(nextCamera.y * dpr) / dpr,
+  };
 }
 
 function safeReleasePointerCapture(element: HTMLDivElement | null, pointerId: number) {
@@ -547,26 +559,31 @@ export function Canvas({
     HEADER_HEIGHT + 23 + index * PORT_ROW_HEIGHT;
 
   const getViewportPoint = (clientX: number, clientY: number) => {
-    const rect = viewportRef.current?.getBoundingClientRect();
+    const viewport = viewportRef.current;
+    const rect = viewport?.getBoundingClientRect();
     if (!rect) {
       return { x: 0, y: 0 };
     }
 
     return {
-      x: clientX - rect.left,
-      y: clientY - rect.top,
+      x: clientX - rect.left + (viewport?.scrollLeft ?? 0),
+      y: clientY - rect.top + (viewport?.scrollTop ?? 0),
     };
   };
 
   const getClampedViewportPoint = (clientX: number, clientY: number) => {
-    const rect = viewportRef.current?.getBoundingClientRect();
+    const viewport = viewportRef.current;
+    const rect = viewport?.getBoundingClientRect();
     if (!rect) {
       return { x: 0, y: 0 };
     }
 
+    const scrollLeft = viewport?.scrollLeft ?? 0;
+    const scrollTop = viewport?.scrollTop ?? 0;
+
     return {
-      x: Math.min(rect.width, Math.max(0, clientX - rect.left)),
-      y: Math.min(rect.height, Math.max(0, clientY - rect.top)),
+      x: Math.min(rect.width + scrollLeft, Math.max(scrollLeft, clientX - rect.left + scrollLeft)),
+      y: Math.min(rect.height + scrollTop, Math.max(scrollTop, clientY - rect.top + scrollTop)),
     };
   };
 
@@ -596,28 +613,16 @@ export function Canvas({
     };
   };
 
-  const defaultZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, initialCamera.zoom));
-
   const zoomToSliderValue = (zoom: number) => {
     const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
-    if (clampedZoom <= defaultZoom) {
-      const denominator = Math.max(defaultZoom - MIN_ZOOM, Number.EPSILON);
-      return ZOOM_SLIDER_MIN + ((clampedZoom - MIN_ZOOM) / denominator) * (ZOOM_SLIDER_MID - ZOOM_SLIDER_MIN);
-    }
-
-    const denominator = Math.max(MAX_ZOOM - defaultZoom, Number.EPSILON);
-    return ZOOM_SLIDER_MID + ((clampedZoom - defaultZoom) / denominator) * (ZOOM_SLIDER_MAX - ZOOM_SLIDER_MID);
+    const ratio = (clampedZoom - MIN_ZOOM) / Math.max(MAX_ZOOM - MIN_ZOOM, Number.EPSILON);
+    return ZOOM_SLIDER_MIN + ratio * (ZOOM_SLIDER_MAX - ZOOM_SLIDER_MIN);
   };
 
   const sliderValueToZoom = (sliderValue: number) => {
     const clampedSlider = Math.min(ZOOM_SLIDER_MAX, Math.max(ZOOM_SLIDER_MIN, sliderValue));
-    if (clampedSlider <= ZOOM_SLIDER_MID) {
-      const ratio = (clampedSlider - ZOOM_SLIDER_MIN) / Math.max(ZOOM_SLIDER_MID - ZOOM_SLIDER_MIN, Number.EPSILON);
-      return MIN_ZOOM + ratio * (defaultZoom - MIN_ZOOM);
-    }
-
-    const ratio = (clampedSlider - ZOOM_SLIDER_MID) / Math.max(ZOOM_SLIDER_MAX - ZOOM_SLIDER_MID, Number.EPSILON);
-    return defaultZoom + ratio * (MAX_ZOOM - defaultZoom);
+    const ratio = (clampedSlider - ZOOM_SLIDER_MIN) / Math.max(ZOOM_SLIDER_MAX - ZOOM_SLIDER_MIN, Number.EPSILON);
+    return MIN_ZOOM + ratio * (MAX_ZOOM - MIN_ZOOM);
   };
 
   const setZoomAtViewportCenter = (nextZoom: number) => {
@@ -984,6 +989,39 @@ export function Canvas({
   }, []);
 
   useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const resetViewportScroll = () => {
+      if (viewport.scrollLeft !== 0 || viewport.scrollTop !== 0) {
+        viewport.scrollLeft = 0;
+        viewport.scrollTop = 0;
+      }
+    };
+
+    const handleViewportScroll = () => {
+      resetViewportScroll();
+    };
+
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && viewport.contains(event.target)) {
+        resetViewportScroll();
+      }
+    };
+
+    resetViewportScroll();
+    viewport.addEventListener("scroll", handleViewportScroll, { passive: true });
+    document.addEventListener("focusin", handleFocusIn, true);
+
+    return () => {
+      viewport.removeEventListener("scroll", handleViewportScroll);
+      document.removeEventListener("focusin", handleFocusIn, true);
+    };
+  }, []);
+
+  useEffect(() => {
     const closeMenus = () => {
       setMenuState(null);
       setMenuCategory(null);
@@ -995,6 +1033,44 @@ export function Canvas({
 
     window.addEventListener("click", closeMenus);
     return () => window.removeEventListener("click", closeMenus);
+  }, []);
+
+  useEffect(() => {
+    const keepDocumentPinned = () => {
+      const root = document.scrollingElement;
+      if (!root) {
+        return;
+      }
+
+      if (root.scrollLeft !== 0 || root.scrollTop !== 0) {
+        root.scrollLeft = 0;
+        root.scrollTop = 0;
+      }
+
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
+    };
+
+    const handleFocusIn = (event: FocusEvent) => {
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        return;
+      }
+
+      if (event.target instanceof Node && viewport.contains(event.target)) {
+        keepDocumentPinned();
+      }
+    };
+
+    keepDocumentPinned();
+    window.addEventListener("scroll", keepDocumentPinned, { passive: true });
+    document.addEventListener("focusin", handleFocusIn, true);
+
+    return () => {
+      window.removeEventListener("scroll", keepDocumentPinned);
+      document.removeEventListener("focusin", handleFocusIn, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -1591,7 +1667,13 @@ export function Canvas({
           }
           const point = getViewportPoint(event.clientX, event.clientY);
           setCamera((current) => {
-            const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
+            const nextZoom = Math.min(
+              MAX_ZOOM,
+              Math.max(
+                MIN_ZOOM,
+                current.zoom * (event.deltaY > 0 ? WHEEL_ZOOM_OUT_FACTOR : WHEEL_ZOOM_IN_FACTOR),
+              ),
+            );
             const worldX = (point.x - current.x) / current.zoom;
             const worldY = (point.y - current.y) / current.zoom;
             const nextCamera = clampCamera(

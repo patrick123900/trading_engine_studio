@@ -17,6 +17,12 @@ body,
   height: 100%;
 }
 
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -25,10 +31,12 @@ body {
 }
 
 .editor-shell {
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   background: #191b20;
@@ -53,7 +61,6 @@ select {
   position: relative;
   flex: 1 1 0%;
   min-height: 0;
-  overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
   background:
@@ -337,21 +344,21 @@ select {
   padding: 0;
   user-select: none;
   -webkit-user-select: none;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 0;
   border-radius: 14px;
   background: linear-gradient(180deg, rgb(60, 64, 74), rgb(34, 36, 42));
   color: inherit;
   text-align: left;
-  overflow: visible;
+  overflow: hidden;
   box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
     0 18px 36px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .node-card-shell {
-  border-radius: 14px;
+  border-radius: inherit;
   overflow: hidden;
-  background: linear-gradient(180deg, rgb(60, 64, 74), rgb(34, 36, 42));
 }
 
 .group-card {
