@@ -405,38 +405,54 @@ async function stabilizeExecutionFeedback(
   const portalInputsByChannel = getPortalInputMap(graph);
   let previousSignalsKey = "";
 
-  for (let iteration = 0; iteration < 6; iteration += 1) {
-    for (const node of snapshot.orderedNodes) {
-      if (hasBlockingUpstreamFailure(graph, node.id, snapshot.outputsByNodeId, pendingErrors)) {
-        pendingErrors.set(node.id, new Error("Skipped: upstream node failed."));
-        continue;
-      }
+  const refreshNode = async (node: GraphNode) => {
+    if (hasBlockingUpstreamFailure(graph, node.id, snapshot.outputsByNodeId, pendingErrors)) {
+      pendingErrors.set(node.id, new Error("Skipped: upstream node failed."));
+      return;
+    }
 
-      try {
-        snapshot.outputsByNodeId.set(
-          node.id,
-          await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
-        );
-        pendingErrors.delete(node.id);
-      } catch (error) {
-        const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
-        if (!snapshot.outputsByNodeId.has(node.id)) {
-          pendingErrors.set(node.id, normalized);
-        }
-        // Ignore per-node errors during stabilization; the loop converges on valid
-        // outputs once all feedback-cycle dependencies have been satisfied.
+    try {
+      snapshot.outputsByNodeId.set(
+        node.id,
+        await executeNode(graph, node, snapshot.outputsByNodeId, portalInputsByChannel),
+      );
+      pendingErrors.delete(node.id);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error("Unknown node execution error.");
+      if (!snapshot.outputsByNodeId.has(node.id)) {
+        pendingErrors.set(node.id, normalized);
       }
+      // Ignore per-node errors during stabilization; the loop converges on valid
+      // outputs once all feedback-cycle dependencies have been satisfied.
+    }
+  };
+
+  // The execution node runs first in every feedback cycle (see buildExecutionOrder),
+  // so each pass it consumes the Close/entry signals produced in the PREVIOUS pass.
+  // We allow extra iterations so a feedback signal (e.g. a stop-loss/take-profit
+  // derived from Position PnL) has time to propagate through longer portal chains.
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    for (const node of snapshot.orderedNodes) {
+      await refreshNode(node);
     }
 
     const currentSignals = resolveExecutionSignals(graph, snapshot, executionNode.id);
     const currentSignalsKey = JSON.stringify(currentSignals);
 
     if (iteration > 0 && currentSignalsKey === previousSignalsKey) {
-      return;
+      break;
     }
 
     previousSignalsKey = currentSignalsKey;
   }
+
+  // The execution node ran at the START of the final pass, so its stored Long/Short
+  // Position and Position PnL outputs were computed from the Close signals of the pass
+  // before last. Recompute it once more from the now-settled signals so the node's own
+  // outputs match the signals the backtest summary re-simulates from. Without this the
+  // node's PnL/position series can lag a feedback Close by one pass and appear to never
+  // close, even though the summary closes the position correctly.
+  await refreshNode(executionNode);
 }
 
 function computeDrawdown(curve: EquityPoint[]) {

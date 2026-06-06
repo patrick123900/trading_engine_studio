@@ -368,6 +368,11 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
   const hasPreviewSelection = selectedPreviews.length > 0;
   const [viewWindow, setViewWindow] = useState({ start: 0, end: 1 });
   const [isPanning, setIsPanning] = useState(false);
+  // Bumped whenever the canvas changes size (panel reopen, window resize) so the
+  // render effects below redraw. They read live canvas dimensions and bail when the
+  // canvas has zero size, so without this signal the chart stays blank after the
+  // panel is hidden and shown again until the next backtest run changes `result`.
+  const [canvasResizeTick, setCanvasResizeTick] = useState(0);
 
   // ── Worker init (once on mount) ──────────────────────────────────────────
   useEffect(() => {
@@ -416,6 +421,28 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
       canvasTransferredRef.current = false;
       setIsWorkerActive(false);
     };
+  }, []);
+
+  // ── Redraw when the canvas itself changes size ────────────────────────────
+  // The render effects read live canvas dimensions and skip drawing when the
+  // canvas has zero size. When this panel is hidden it unmounts, and on reopen the
+  // canvas can briefly measure zero (e.g. during the drawer height transition), so
+  // we observe size changes and bump a tick to re-run the render effects.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+
+    let lastWidth = -1;
+    let lastHeight = -1;
+    const observer = new ResizeObserver(() => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === lastWidth && rect.height === lastHeight) return;
+      lastWidth = rect.width;
+      lastHeight = rect.height;
+      setCanvasResizeTick((tick) => tick + 1);
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
   }, []);
 
   // ── Send raw price/equity data to worker whenever result changes ──────────
@@ -689,7 +716,7 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
         previewRanges: [], previewMin: 0, previewMax: 1,
       });
     }
-  }, [chartModel, previewModel, timeTicks, hasPreviewSelection, isWorkerActive]);
+  }, [chartModel, previewModel, timeTicks, hasPreviewSelection, isWorkerActive, canvasResizeTick]);
 
   // Fallback path: always render on main thread if worker mode is unavailable.
   useEffect(() => {
@@ -871,6 +898,7 @@ function ResultsPanelComponent({ result, selectedPreviews, onPreferredHeightChan
     result.tradeMarkers,
     selectedPreviews,
     timeTicks,
+    canvasResizeTick,
   ]);
 
   return (
